@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# 重新生成终结者风格警告语音 → resources/warning_intruder.mp3
+# 生成英文终结者/安保风格警告语音 → resources/warning_intruder.mp3
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT_MP3="$ROOT/resources/warning_intruder.mp3"
+OUT_ALT="$ROOT/resources/warning_intruder_alt_guy.mp3"
 OUT_VTT="$ROOT/resources/warning_intruder.vtt"
-TEXT="发现入侵，请立刻离开，否则开火，后果自负。"
+TEXT="Intruder detected. Leave the area immediately. Or you will be fired upon. Consequences will be severe."
 
 export PATH="${HOME}/Library/Python/3.9/bin:${PATH}"
 
@@ -15,14 +16,24 @@ if ! command -v edge-tts >/dev/null 2>&1; then
 fi
 
 mkdir -p "$ROOT/resources"
-# 低沉、偏慢、机械感（可按口味改 rate/pitch/voice）
+
+# Primary: authoritative news-style male
 edge-tts \
-  --voice "zh-CN-YunjianNeural" \
+  --voice "en-US-ChristopherNeural" \
   --rate="-20%" \
-  --pitch="-25Hz" \
+  --pitch="-18Hz" \
   --text "$TEXT" \
   --write-media "$OUT_MP3" \
   --write-subtitles "$OUT_VTT"
 
+# Alternate: deeper Guy
+edge-tts \
+  --voice "en-US-GuyNeural" \
+  --rate="-18%" \
+  --pitch="-22Hz" \
+  --text "$TEXT" \
+  --write-media "$OUT_ALT"
+
 echo "Wrote: $OUT_MP3"
-ls -la "$OUT_MP3"
+echo "Wrote: $OUT_ALT"
+ls -la "$OUT_MP3" "$OUT_ALT"

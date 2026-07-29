@@ -44,16 +44,37 @@ S1 沿地面 **蓝色** 色带巡逻；在定时哨位抬头扫描是否有人�
 | 运行环境 | S1 App 实验室 Python（车载） |
 | 开发方式 | 在 Mac 编写 `onboard/` 兼容代码 → 拷贝进 App 运行 |
 
-### 2.1 警告文案
+### 2.1 警告文案与语音
+
+中文 edge-tts 可用音色有限，试听后中文机械感/自然度不理想，**主版本改为英文**（更贴近「终结者 / 安保广播」质感）。
+
+**英文（主文件，默认）**
 
 ```
-发现入侵，请立刻离开，否则开火，后果自负
+Intruder detected. Leave the area immediately. Or you will be fired upon. Consequences will be severe.
+```
+
+**中文（语义对照，车上实现仍可用内置音；不强制播放中文 TTS）**
+
+```
+发现入侵，请立刻离开，否则开火，后果自负。
 ```
 
 合成音频：
 
-- `resources/warning_intruder.mp3` — 低沉、偏机械感的中文男声（edge-tts）  
-- `resources/warning_intruder.vtt` — 同句字幕时间轴（可选）
+| 文件 | 说明 |
+|---|---|
+| `resources/warning_intruder.mp3` | **主警告**：`en-US-ChristopherNeural`，偏慢、偏低、权威播报感 |
+| `resources/warning_intruder_alt_guy.mp3` | 备选：`en-US-GuyNeural`，可 A/B 试听 |
+| `resources/warning_intruder.vtt` | 主文件字幕时间轴 |
+
+试听：
+
+```bash
+afplay resources/warning_intruder.mp3
+# 备选
+afplay resources/warning_intruder_alt_guy.mp3
+```
 
 重新生成：
 
@@ -152,7 +173,8 @@ s1-line-guard/
 ├── LICENSE
 ├── .gitignore
 ├── resources/
-│   ├── warning_intruder.mp3  # 警告语音（终结者风格）
+│   ├── warning_intruder.mp3          # 主警告（英文，权威男声）
+│   ├── warning_intruder_alt_guy.mp3  # 备选音色
 │   └── warning_intruder.vtt
 ├── docs/
 │   └── design-notes.md       # 设计备忘（状态机与 API 映射草稿）

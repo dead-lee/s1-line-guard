@@ -2,8 +2,17 @@
 
 | 文件 | 说明 |
 |---|---|
-| `warning_intruder.mp3` | 警告语音：「发现入侵，请立刻离开，否则开火，后果自负。」（低沉机械感中文） |
-| `warning_intruder.vtt` | 对应字幕 |
+| `warning_intruder.mp3` | **主警告（英文）**：Intruder detected…（Christopher，权威/低沉） |
+| `warning_intruder_alt_guy.mp3` | 备选英文音色（Guy） |
+| `warning_intruder.vtt` | 主文件字幕 |
+
+文案：
+
+```
+Intruder detected. Leave the area immediately. Or you will be fired upon. Consequences will be severe.
+```
+
+中文语义对照：发现入侵，请立刻离开，否则开火，后果自负。
 
 重生成：`../scripts/generate_warning_audio.sh`
 
