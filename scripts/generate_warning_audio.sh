@@ -17,20 +17,20 @@ fi
 
 mkdir -p "$ROOT/resources"
 
-# Primary: authoritative news-style male
+# Primary: urgent, faster authoritative male
 edge-tts \
   --voice "en-US-ChristopherNeural" \
-  --rate="-20%" \
-  --pitch="-18Hz" \
+  --rate="+25%" \
+  --pitch="-10Hz" \
   --text "$TEXT" \
   --write-media "$OUT_MP3" \
   --write-subtitles "$OUT_VTT"
 
-# Alternate: deeper Guy
+# Alternate: urgent Guy
 edge-tts \
   --voice "en-US-GuyNeural" \
-  --rate="-18%" \
-  --pitch="-22Hz" \
+  --rate="+28%" \
+  --pitch="-12Hz" \
   --text "$TEXT" \
   --write-media "$OUT_ALT"
 

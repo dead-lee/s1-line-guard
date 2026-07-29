@@ -64,8 +64,8 @@ Intruder detected. Leave the area immediately. Or you will be fired upon. Conseq
 
 | 文件 | 说明 |
 |---|---|
-| `resources/warning_intruder.mp3` | **主警告**：`en-US-ChristopherNeural`，偏慢、偏低、权威播报感 |
-| `resources/warning_intruder_alt_guy.mp3` | 备选：`en-US-GuyNeural`，可 A/B 试听 |
+| `resources/warning_intruder.mp3` | **主警告**：`en-US-ChristopherNeural`，**急促**（rate +25%）、略低沉 |
+| `resources/warning_intruder_alt_guy.mp3` | 备选：`en-US-GuyNeural`，急促（rate +28%） |
 | `resources/warning_intruder.vtt` | 主文件字幕时间轴 |
 
 试听：

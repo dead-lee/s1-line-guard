@@ -2,8 +2,8 @@
 
 | 文件 | 说明 |
 |---|---|
-| `warning_intruder.mp3` | **主警告（英文）**：Intruder detected…（Christopher，权威/低沉） |
-| `warning_intruder_alt_guy.mp3` | 备选英文音色（Guy） |
+| `warning_intruder.mp3` | **主警告（英文）**：Intruder detected…（Christopher，急促） |
+| `warning_intruder_alt_guy.mp3` | 备选英文音色（Guy，急促） |
 | `warning_intruder.vtt` | 主文件字幕 |
 
 文案：
