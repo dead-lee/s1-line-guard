@@ -122,18 +122,19 @@ INIT → PATROL ⇄ SCAN → LOCK → FIRE → RECOVER → PATROL
 - [x] 彩灯测试 `led_color_test.py` 验证 App 可跑 Python  
 - [x] 放弃本期语音  
 
-### M1 — 分时巡逻骨架（先不上真循线 API 也行）
+### M1 — 第一版可测程序（已交付代码）
 
-**目标：** 状态在 PATROL ↔ SCAN 间切换；SCAN 时停车、云台左右扫、再回 PATROL 姿态。
+**目标：** 单文件完整状态机 + 循线 + 扫描 + **PID 瞄准** + 开火逻辑（语音不做）。
 
 | 任务 | 验收 |
 |---|---|
-| `start()` 主循环 + 状态枚举 | 不闪退、可停 |
-| SCAN：底盘停 + yaw 扫 | 肉眼可见左右扫 |
-| 参数 `T_MOVE` / `T_SCAN` 可调 | 改参行为变 |
-| 灯：SCAN 可用弱提示（可选） | 非必须 |
+| `onboard/line_guard.py` 可粘贴 | 不闪退 |
+| PATROL ↔ SCAN | 循线一段时间后停车扫 |
+| LOCK：红闪 + PID 枪口对人 | 云台跟随人中心 |
+| FIRE：3s 后每 1s 点射 | 无弹也可听机构/看逻辑 |
+| `ENABLE_LINE` / `ENABLE_FIRE` | 可关线测扫描、可关火 |
 
-**交付：** `line_guard.py` 第一版（可粘贴），仅 M1 行为。
+**交付：** `line_guard.py` **v1**（待实车反馈调参）。
 
 ### M2 — 蓝线巡线接入
 

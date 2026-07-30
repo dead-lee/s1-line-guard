@@ -26,8 +26,19 @@ Mac 仓库可继续用多文件做草稿，**上车前合并为单文件**。
 
 | 文件 | 说明 |
 |---|---|
-| `led_color_test.py` | **彩灯测试**：变色 → 呼吸 → 闪烁 → 关灯（请先跑这个） |
-| `config.py` / `main.py` | 早期占位；正式程序将改为单文件分块（见上） |
+| **`line_guard.py`** | **正式 v1 哨兵程序**（单文件，粘贴运行） |
+| `led_color_test.py` | 彩灯测试（验证 App 环境） |
+| `config.py` / `main.py` | 早期占位，可忽略 |
+
+## 运行 `line_guard.py`（v1）
+
+1. DIY → **Python** → 全选粘贴 `line_guard.py`  
+2. 蓝胶带单环（可选：`ENABLE_LINE = False` 先测扫描/锁定）  
+3. 连接 S1 运行  
+4. 默认 `ENABLE_FIRE = True`（无弹也可测开火逻辑）  
+5. 对准使用 **软件 PID** 驱动云台 yaw/pitch  
+
+反馈时请说明：状态行为、报错原文、需要调的参数（PID / 俯仰 / 时间）。
 
 ## 如何运行 `led_color_test.py`
 
