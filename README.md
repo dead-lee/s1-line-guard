@@ -157,10 +157,10 @@ s1-line-guard/
 │   └── warning_intruder.vtt
 ├── docs/
 │   └── design-notes.md
-├── onboard/                   # 将来拷进 S1 App（逻辑未实现）
-│   ├── README.md
-│   ├── config.py
-│   └── main.py
+├── onboard/                   # 粘贴进 S1 App 实验室的代码
+│   ├── README.md              # 含「单文件」约定
+│   ├── led_color_test.py      # 彩灯变色测试（先跑这个）
+│   ├── config.py / main.py    # 早期占位；正式版将合并为单文件分块
 └── scripts/
     └── generate_warning_audio.sh
 ```
