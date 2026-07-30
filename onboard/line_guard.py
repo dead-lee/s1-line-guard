@@ -3,8 +3,8 @@
 S1 Line Guard v1 — 沿线哨兵（单文件，整段粘贴进 App 实验室 Python）
 
 功能概要：
-  PATROL  低头沿蓝线走一段时间
-  SCAN    停车抬头，云台左右扫人
+  PATROL  低头沿蓝线走一段时间（默认 3s）；无蓝线则原地进入 SCAN
+  SCAN    停车抬头，云台按角速度连续转满 N 圈扫人（不用固定总时长）
   LOCK    发现人：红闪 + PID 把枪口对准人
   FIRE    对准后满 3s 仍看见人：每 1s 点射（无弹也可测逻辑）
   RECOVER 人离开：停火、回巡线俯仰、找线
@@ -23,19 +23,19 @@ S1 Line Guard v1 — 沿线哨兵（单文件，整段粘贴进 App 实验室 Py
 # =============================================================================
 
 # --- 时间节奏 ---
-T_MOVE = 2.0              # 每次低头循线时长（秒）
-T_SCAN = 4.0              # 单次哨位扫描总时长（秒）
+T_MOVE = 3.0              # 有蓝线时：低头循线多久后进入 SCAN（秒）
 T_WARN_BEFORE_FIRE = 3.0  # 锁定后首次点射前等待（秒）
 T_FIRE_INTERVAL = 1.0     # 点射间隔（秒）
 T_CLEAR = 2.0             # 连续多久看不到人算离开（秒）
 LOOP_DT = 0.05            # 主循环周期（秒）
 
-# --- 云台姿态（实车请微调）---
+# --- 云台姿态 / 扫描（按「转几圈」结束，不用总时长参数）---
 PITCH_LINE = -20          # 巡线俯仰（低头看线）
 PITCH_SCAN = 5            # 扫人俯仰（略抬头）
-YAW_SCAN_MIN = -70        # 扫描 yaw 左限
-YAW_SCAN_MAX = 70         # 扫描 yaw 右限
-YAW_SCAN_SPEED = 60       # 扫描角速度 °/s 量级（经 rotate 相对角实现）
+# 扫描角速度 °/s：180 → 约 2s/圈；150 → 约 2.4s/圈（4s/圈偏慢，故默认 180）
+SCAN_YAW_SPEED = 180.0
+# 转满几圈无人则回 PATROL：1=快扫，2=更仔细
+SCAN_TURNS = 1
 
 # --- 循线 ---
 LINE_SPEED = 0.35         # 巡线前进速度 m/s
@@ -58,7 +58,8 @@ AIM_OK_ERR = 0.08
 
 # --- 开关 ---
 ENABLE_FIRE = True        # 无弹也可 True，只测开火逻辑
-ENABLE_LINE = True        # False 时 PATROL 改为原地等待（方便无胶带时测扫描/锁定）
+# 无蓝线时：默认停车原地 SCAN（不必再关 ENABLE_LINE）；仅调试可设 False 强制当“无线”
+FORCE_NO_LINE = False
 
 # --- 灯 ---
 FLASH_HZ = 4
@@ -79,8 +80,8 @@ g_state = STATE_INIT
 g_state_t0 = 0.0          # 进入当前状态时的程序运行时间
 g_no_person_t0 = 0.0      # 开始连续丢人的时间
 g_last_fire_t = 0.0
-g_scan_dir = 1            # 扫描方向 +1 / -1
-g_scan_yaw = 0.0
+g_patrol_line_t0 = 0.0    # 开始连续“有线循线”的时间；丢线则清零
+g_scan_deg_done = 0.0     # 本轮 SCAN 已转过的角度（度）
 
 # 软件 PID 状态：yaw
 g_iy = 0.0
@@ -235,46 +236,67 @@ def chassis_halt():
     chassis_ctrl.stop()
 
 
+def line_info_raw():
+    return vision_ctrl.get_line_detection_info()
+
+
+def line_seen():
+    """
+    是否看到蓝线。FORCE_NO_LINE 时强制 False。
+    线信息格式因固件略有差异：常见 info[2]>=1 表示有线。
+    """
+    if FORCE_NO_LINE:
+        return False
+    info = line_info_raw()
+    try:
+        n = len(info)
+    except Exception:
+        return False
+    if n < 3:
+        return False
+    try:
+        if info[2] is not None and info[2] >= 1:
+            return True
+    except Exception:
+        return False
+    # 兜底：有足够长度且 index19 像 0~1 的中心值
+    try:
+        if n >= 20:
+            cx = info[19]
+            if cx is not None and cx > 0.0 and cx < 1.0:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def line_follow_step():
     """
     根据线识别信息做简单 P 循线。
-    线信息格式因固件略有差异：常见 [.., 中心 x 在 index 19 附近]
-    解析失败则直行慢速。
+    线信息：常见 info[19] 为线中心 x（0~1）。
     """
-    if not ENABLE_LINE:
-        chassis_halt()
-        return
-
-    info = vision_ctrl.get_line_detection_info()
-    # 默认直行
+    info = line_info_raw()
     vx = LINE_SPEED
     yaw_rate = 0.0
 
     try:
-        # 社区常用：长度约 42 且 info[2]>=1 表示看到线；info[19] 为线中心 x
         n = 0
         try:
             n = len(info)
         except Exception:
             n = 0
         if n >= 20:
-            # 尝试：第 3 项是否“有线”
-            has = True
-            try:
-                if info[2] is not None and info[2] < 1:
-                    has = False
-            except Exception:
-                has = True
-            if has:
-                cx = info[19]
-                err = cx - 0.5
-                # 线偏右 → 车向右转（正旋转）还是左？麦克纳姆常见：
-                # move_with_speed(x, y, z) z 为旋转；经验上 err 取反需实车反馈
-                yaw_rate = clamp(-err * LINE_PID_KP, -LINE_PID_OUT_MAX, LINE_PID_OUT_MAX)
+            cx = info[19]
+            err = cx - 0.5
+            yaw_rate = clamp(-err * LINE_PID_KP, -LINE_PID_OUT_MAX, LINE_PID_OUT_MAX)
     except Exception:
         yaw_rate = 0.0
 
     chassis_ctrl.move_with_speed(vx, 0, yaw_rate)
+
+
+def scan_degrees_needed():
+    return 360.0 * SCAN_TURNS
 
 
 # =============================================================================
@@ -297,7 +319,7 @@ def fire_stop():
 
 def set_state(s):
     global g_state, g_state_t0, g_no_person_t0, g_last_fire_t
-    global g_scan_dir, g_scan_yaw
+    global g_patrol_line_t0, g_scan_deg_done
     g_state = s
     g_state_t0 = now_s()
     g_no_person_t0 = now_s()
@@ -308,7 +330,7 @@ def set_state(s):
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         gimbal_set_pitch_line()
         leds_normal()
-        # 巡线时也可顺便开线识别
+        g_patrol_line_t0 = 0.0
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
 
     elif s == STATE_SCAN:
@@ -316,9 +338,7 @@ def set_state(s):
         chassis_halt()
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         gimbal_set_pitch_scan()
-        g_scan_dir = 1
-        g_scan_yaw = 0.0
-        # 扫人时仍保留线识别，恢复时更快；行人已在 init 打开
+        g_scan_deg_done = 0.0
         leds_normal()
 
     elif s == STATE_LOCK:
@@ -333,7 +353,7 @@ def set_state(s):
         chassis_halt()
         pid_reset_aim()
         leds_alert_red()
-        g_last_fire_t = 0.0  # 进入后马上允许第一发（满足 3s 后）
+        g_last_fire_t = 0.0
 
     elif s == STATE_RECOVER:
         fire_stop()
@@ -352,40 +372,46 @@ def state_age():
 # =============================================================================
 
 def tick_patrol():
-    # 循线过程中若已看到人，直接锁定（可选增强）
+    global g_patrol_line_t0
+
     if people_seen():
         set_state(STATE_LOCK)
         return
 
-    line_follow_step()
+    # 默认：没线 → 原地 SCAN（停车扫一圈/两圈）
+    if not line_seen():
+        g_patrol_line_t0 = 0.0
+        chassis_halt()
+        set_state(STATE_SCAN)
+        return
 
-    if state_age() >= T_MOVE:
+    # 有线：累积循线时间，满 T_MOVE 再 SCAN
+    if g_patrol_line_t0 <= 0.0:
+        g_patrol_line_t0 = now_s()
+    line_follow_step()
+    if (now_s() - g_patrol_line_t0) >= T_MOVE:
+        g_patrol_line_t0 = 0.0
         set_state(STATE_SCAN)
 
 
 def tick_scan():
-    global g_scan_dir, g_scan_yaw
+    global g_scan_deg_done
 
     chassis_halt()
 
     if people_seen():
+        gimbal_stop()
         set_state(STATE_LOCK)
         return
 
-    # 简单左右扫：用相对小步旋转模拟扫描
-    # 使用 rotate_with_speed 持续转，到边界反向
-    step = YAW_SCAN_SPEED * LOOP_DT * g_scan_dir
-    g_scan_yaw = g_scan_yaw + step
-    if g_scan_yaw >= YAW_SCAN_MAX:
-        g_scan_yaw = YAW_SCAN_MAX
-        g_scan_dir = -1
-    if g_scan_yaw <= YAW_SCAN_MIN:
-        g_scan_yaw = YAW_SCAN_MIN
-        g_scan_dir = 1
+    # 匀速转：累计角度 = 速度 * dt；转满 SCAN_TURNS 圈结束
+    spd = SCAN_YAW_SPEED
+    if spd < 1.0:
+        spd = 1.0
+    g_scan_deg_done = g_scan_deg_done + spd * LOOP_DT
+    gimbal_ctrl.rotate_with_speed(spd, 0)
 
-    gimbal_ctrl.rotate_with_speed(YAW_SCAN_SPEED * g_scan_dir, 0)
-
-    if state_age() >= T_SCAN:
+    if g_scan_deg_done >= scan_degrees_needed():
         gimbal_stop()
         set_state(STATE_PATROL)
 

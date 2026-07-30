@@ -98,11 +98,12 @@ INIT → PATROL ⇄ SCAN → LOCK → FIRE → RECOVER → PATROL
 
 | 参数 | 初值 | 含义 |
 |---|---|---|
-| `T_MOVE` | 2.0 s | 每次低头循线时长 |
-| `T_SCAN` | 4.0 s | 单次哨位扫描时长 |
-| `YAW_SCAN_MIN/MAX` | -70 / 70 | 扫描 yaw 幅度（实车标定） |
+| `T_MOVE` | 3.0 s | 有蓝线时低头循线多久后 SCAN |
+| `SCAN_YAW_SPEED` | 180 °/s | 扫描角速度（约 2s/圈） |
+| `SCAN_TURNS` | 1 | 转满几圈无人则回巡逻（可改 2） |
 | `PITCH_LINE` | 实车标定 | 巡线俯仰 |
 | `PITCH_SCAN` | 实车标定 | 扫人俯仰 |
+| （默认）无蓝线 | — | 停车原地 SCAN，不靠额外开关 |
 | `T_WARN_BEFORE_FIRE` | 3.0 s | 发现人后首次点射前等待 |
 | `T_FIRE_INTERVAL` | 1.0 s | 点射间隔 |
 | `T_CLEAR` | 2.0 s | 连续无人多久算离开 |
