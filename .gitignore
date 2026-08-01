@@ -9,3 +9,7 @@ venv/
 .vscode/
 *.swp
 .Python
+
+# 本地调试截图/日志（保留 logs/README.md）
+logs/*
+!logs/README.md

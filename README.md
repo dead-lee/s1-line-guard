@@ -161,9 +161,14 @@ s1-line-guard/
 │   ├── README.md              # 含「单文件」约定
 │   ├── led_color_test.py      # 彩灯变色测试（先跑这个）
 │   ├── config.py / main.py    # 早期占位；正式版将合并为单文件分块
+├── logs/                      # 调试：截图/日志放这里；AI 读最新文件
+│   └── README.md
 └── scripts/
     └── generate_warning_audio.sh
 ```
+
+调试时把 App 控制台截图丢进 `logs/`，对话里说「看 logs」即可（不必往聊天里贴图）。
+
 
 ---
 

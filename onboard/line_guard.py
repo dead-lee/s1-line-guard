@@ -550,8 +550,9 @@ def tick_fire():
     chassis_halt()
     aligned, has = aim_pid_towards_person(LOOP_DT)
 
-    if not has:
-        if now_s() - g_no_person_t0 >= T_CLEAR:
+    if has == False:
+        lost_t = now_s() - g_no_person_t0
+        if lost_t >= T_CLEAR:
             fire_stop()
             log("FIRE: person lost -> RECOVER")
             set_state(STATE_RECOVER, "person_lost_while_firing")
@@ -561,16 +562,19 @@ def tick_fire():
 
     # 持续 PID 对准的同时按间隔点射
     t = now_s()
-    if g_last_fire_t <= 0.0 or (t - g_last_fire_t) >= T_FIRE_INTERVAL:
-        if aligned or True:
-            fire_once_safe()
-            g_last_fire_t = t
+    need_fire = False
+    if g_last_fire_t <= 0.0:
+        need_fire = True
+    if (t - g_last_fire_t) >= T_FIRE_INTERVAL:
+        need_fire = True
+    if need_fire:
+        fire_once_safe()
+        g_last_fire_t = t
 
 
 def tick_recover():
     chassis_halt()
     gimbal_set_pitch_line()
-    # 短暂停顿后回巡逻
     if state_age() >= 0.8:
         set_state(STATE_PATROL, "recover_done")
 
@@ -586,55 +590,41 @@ def setup():
     gimbal_ctrl.recenter()
     time.sleep(0.3)
 
-    # 视觉
     vision_ctrl.enable_detection(rm_define.vision_detection_people)
     vision_ctrl.enable_detection(rm_define.vision_detection_line)
     vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-    # 循线曝光可按场地改：small 更不易糊
     media_ctrl.exposure_value_update(rm_define.exposure_value_medium)
 
     gun_ctrl.set_fire_count(1)
     leds_normal()
     gimbal_set_pitch_line()
-    log("setup done: people+line on, free mode, T_MOVE=%.1f SCAN_TURNS=%d SPEED=%.0f FIRE=%s" % (
+    log("setup done T_MOVE=%.1f TURNS=%d SPEED=%.0f FIRE=%s" % (
         T_MOVE, SCAN_TURNS, SCAN_YAW_SPEED, str(ENABLE_FIRE)
     ))
 
 
 def start():
-    """App 实验室入口"""
+    """App 实验室入口。粘贴时请全选覆盖，勿混入旧代码。"""
     global g_state
     print("======== Line Guard v1 start ========")
     log("program start()")
-    try:
-        setup()
-        set_state(STATE_PATROL, "boot")
+    setup()
+    set_state(STATE_PATROL, "boot")
 
-        while True:
-            if g_state == STATE_PATROL:
-                tick_patrol()
-            elif g_state == STATE_SCAN:
-                tick_scan()
-            elif g_state == STATE_LOCK:
-                tick_lock()
-            elif g_state == STATE_FIRE:
-                tick_fire()
-            elif g_state == STATE_RECOVER:
-                tick_recover()
-            else:
-                log("unknown state, reset PATROL")
-                set_state(STATE_PATROL, "unknown_state")
+    while True:
+        if g_state == STATE_PATROL:
+            tick_patrol()
+        elif g_state == STATE_SCAN:
+            tick_scan()
+        elif g_state == STATE_LOCK:
+            tick_lock()
+        elif g_state == STATE_FIRE:
+            tick_fire()
+        elif g_state == STATE_RECOVER:
+            tick_recover()
+        else:
+            log("unknown state, reset PATROL")
+            set_state(STATE_PATROL, "unknown_state")
 
-            log_heartbeat()
-            time.sleep(LOOP_DT)
-    except Exception as e:
-        # 尽量把异常打到控制台
-        print("[LG FATAL] exception: %s" % str(e))
-        log("FATAL: %s" % str(e))
-        try:
-            chassis_halt()
-            gimbal_stop()
-            fire_stop()
-        except Exception:
-            pass
-        raise
+        log_heartbeat()
+        time.sleep(LOOP_DT)
