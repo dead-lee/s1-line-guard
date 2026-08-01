@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.1.1 stamp=2026-08-01 12:15:56  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.1.1 stamp=2026-08-01 12:16:06  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard v1.1 — 单文件，整段粘贴进 App 实验室 Python
 # PATROL: 有线循线 3s；无线原地 SCAN
@@ -440,7 +440,9 @@ def setup():
 
 def start():
     global g_state
-    print("======== Line Guard v1.1 start ========")
+    # 控制台也应打印版本戳，便于确认贴进 App 的是哪一版
+    print("======== Line Guard start ========")
+    print("# LINE_GUARD_VERSION=1.1.1 stamp=2026-08-01 12:16:06")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
