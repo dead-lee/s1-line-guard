@@ -1,28 +1,17 @@
-# WHEEL_CLEAN_VERSION=1.1.0 stamp=2026-08-01 13:52:23  (paste whole file; check stamp)
+# WHEEL_CLEAN_VERSION=1.2.0 stamp=2026-08-01 13:54:22  (paste whole file; check stamp)
 # -*- coding: utf-8 -*-
-# S1 麦轮清洁程序 v1.1 — 慢速、尽量原地不动
+# S1 麦轮清洁 v1.2 — 慢速原地转圈（清洁用）
 #
-# 麦克纳姆运动学（轮速 lf,rf,lr,rr）：
-#   vx ~ (lf+rf+lr+rr)/4
-#   vy ~ (-lf+rf+lr-rr)/4
-#   w  ~ (-lf+rf-lr+rr)/4
-# 要 vx=vy=w=0，一组解是：lf=rf=s, lr=rr=-s  即 (s, s, -s, -s)
-# 以及反向 (-s, -s, s, s)。四轮都在转，合力/合力矩约为 0。
+# 抵消组合在实车上仍会后退，改默认：慢速原地自转。
+# 麦轮 (lf,rf,lr,rr) ≈ (s,-s,s,-s) 主要为 omega，车绕自身转、侧移小。
+# 转速保持很低，方便刷洗。
 #
-# 上一版用了 (s,-s,-s,s) 等组合，在麦轮上会产生侧移，已改掉。
-# CLEAN_MODE:
-#   "hold"  — 仅用抵消组合，车身尽量不动（推荐清洁）
-#   "spin"  — 慢速原地自转 (s,-s,s,-s)，若 hold 仍微移可改用这个
-#
-# 挂自定义技能 / 自主程序后按键触发。架起底盘清洁更安全。
+# 架起底盘更安全；中途 App 停止即可。
 
 # =============================================================================
-# CONFIG — 清洁用慢速
-# =============================================================================
 CLEAN_TOTAL_S = 60.0
-PATTERN_S = 15.0
-WHEEL_RPM = 60            # 慢！清洁不是冲锋；可试 40~100
-CLEAN_MODE = "hold"       # "hold" 原地抵消 | "spin" 慢速自转
+PATTERN_S = 20.0
+WHEEL_RPM = 50
 LOOP_PRINT_S = 5.0
 
 # =============================================================================
@@ -33,16 +22,10 @@ def log(msg):
     print("[WHEEL_CLEAN t=%.1f] %s" % (now_s(), msg))
 
 def make_patterns(s):
-    if CLEAN_MODE == "spin":
-        # 纯自转：vx=vy=0, w≠0；慢速原地转
-        return [
-            (s, -s, s, -s),
-            (-s, s, -s, s),
-        ]
-    # hold：理论上 vx=vy=w=0，四轮仍转
+    # 原地慢转：正转 / 反转 交替，四轮都在动
     return [
-        (s, s, -s, -s),
-        (-s, -s, s, s),
+        (s, -s, s, -s),
+        (-s, s, -s, s),
     ]
 
 def leds_clean_mode():
@@ -64,8 +47,8 @@ def wheels_set(lf, rf, lr, rr):
 
 def start():
     print("======== Wheel Clean start ========")
-    print("# WHEEL_CLEAN_VERSION=1.1.0 stamp=2026-08-01 13:52:23")
-    log("mode=%s rpm=%d total=%.0fs" % (CLEAN_MODE, WHEEL_RPM, CLEAN_TOTAL_S))
+    print("# WHEEL_CLEAN_VERSION=1.2.0 stamp=2026-08-01 13:54:22")
+    log("slow spin clean rpm=%d total=%.0fs" % (WHEEL_RPM, CLEAN_TOTAL_S))
 
     robot_ctrl.set_mode(rm_define.robot_mode_free)
     wheels_stop()
@@ -75,8 +58,11 @@ def start():
     s = WHEEL_RPM
     if s < 0:
         s = -s
-    if s > 200:
-        s = 200
+    if s > 120:
+        s = 120
+    if s < 20:
+        s = 20
+
     patterns = make_patterns(s)
     n_pat = len(patterns)
     t0 = now_s()
@@ -86,7 +72,7 @@ def start():
 
     lf, rf, lr, rr = patterns[0]
     wheels_set(lf, rf, lr, rr)
-    log("pattern %d lf=%d rf=%d lr=%d rr=%d" % (idx, lf, rf, lr, rr))
+    log("spin pattern %d lf=%d rf=%d lr=%d rr=%d" % (idx, lf, rf, lr, rr))
 
     while True:
         t = now_s()
@@ -101,11 +87,11 @@ def start():
                 idx = 0
             lf, rf, lr, rr = patterns[idx]
             wheels_set(lf, rf, lr, rr)
-            log("pattern %d lf=%d rf=%d lr=%d rr=%d" % (idx, lf, rf, lr, rr))
+            log("spin pattern %d lf=%d rf=%d lr=%d rr=%d" % (idx, lf, rf, lr, rr))
 
         if (t - last_print) >= LOOP_PRINT_S:
             last_print = t
-            log("left=%.0fs pattern=%d" % (CLEAN_TOTAL_S - elapsed, idx))
+            log("left=%.0fs dir=%d" % (CLEAN_TOTAL_S - elapsed, idx))
 
         time.sleep(0.15)
 
@@ -113,6 +99,3 @@ def start():
     leds_done()
     log("done stopped")
     print("======== Wheel Clean done ========")
-
-# 自定义技能 / 自主程序：保存后在列表里设为技能或自主，FPV 图标或中控按键触发。
-# 若 hold 仍侧移：改 CLEAN_MODE = "spin"，或 WHEEL_RPM = 40，并架起底盘。
