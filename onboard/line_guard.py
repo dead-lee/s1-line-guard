@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.2.0 stamp=2026-08-01 12:23:17  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.2.1 stamp=2026-08-01 12:25:49  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard v1.2 — 单文件，整段粘贴进 App 实验室 Python
 #
@@ -434,7 +434,7 @@ def tick_patrol():
 
 def tick_scan_common(after_lost):
     """SCAN 与 LOST_SCAN 共用转圈逻辑。"""
-    global g_scan_deg_done
+    global g_scan_deg_done, g_scan_need_deg
     chassis_halt()
     if people_seen():
         gimbal_stop()
@@ -566,12 +566,12 @@ def setup():
     gun_ctrl.set_fire_count(1)
     leds_normal()
     gimbal_set_pitch_line()
-    log("setup done v1.2.0 move=%.1f scan_spd=%.0f fire=%s" % (T_MOVE, SCAN_YAW_SPEED, str(ENABLE_FIRE)))
+    log("setup done v1.2.1 move=%.1f scan_spd=%.0f fire=%s" % (T_MOVE, SCAN_YAW_SPEED, str(ENABLE_FIRE)))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.2.0 stamp=2026-08-01 12:23:17")
+    print("# LINE_GUARD_VERSION=1.2.1 stamp=2026-08-01 12:25:49")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
