@@ -1,77 +1,47 @@
 # -*- coding: utf-8 -*-
-"""
-S1 Line Guard v1 — 沿线哨兵（单文件，整段粘贴进 App 实验室 Python）
-
-功能概要：
-  PATROL  低头沿蓝线走一段时间（默认 3s）；无蓝线则原地进入 SCAN
-  SCAN    停车抬头，云台按角速度连续转满 N 圈扫人（不用固定总时长）
-  LOCK    发现人：红闪 + PID 把枪口对准人
-  FIRE    对准后满 3s 仍看见人：每 1s 点射（无弹也可测逻辑）
-  RECOVER 人离开：停火、回巡线俯仰、找线
-
-使用：
-  1. 新建 DIY → 选 Python
-  2. 全选本文件粘贴 → 连接 S1 → 运行
-  3. 场地：浅色地面 + 蓝色胶带单环；先空弹测逻辑
-
-若某 API 报错：把完整报错发回，常见是枚举名/pid 对象名差异。
-语音告警本期不做。
-
-调试：运行后请打开 App 实验室「控制台/输出」。本程序用 print 输出状态。
-"""
+# S1 Line Guard v1.1 — 单文件，整段粘贴进 App 实验室 Python
+# PATROL: 有线循线 3s；无线原地 SCAN
+# SCAN: 云台匀速转满 N 圈扫人
+# LOCK/FIRE: 红闪 + PID 瞄准；满 3s 后每 1s 点射
+# 调试：print 输出到控制台；截图请放入项目 logs/
+# 粘贴：App 内全选删除后再粘贴，勿混旧代码
 
 # =============================================================================
-# 1. 可调参数（CONFIG）
+# CONFIG
 # =============================================================================
+T_MOVE = 3.0
+T_WARN_BEFORE_FIRE = 3.0
+T_FIRE_INTERVAL = 1.0
+T_CLEAR = 2.0
+LOOP_DT = 0.05
+LOG_HEARTBEAT_S = 1.0
 
-# --- 时间节奏 ---
-T_MOVE = 3.0              # 有蓝线时：低头循线多久后进入 SCAN（秒）
-T_WARN_BEFORE_FIRE = 3.0  # 锁定后首次点射前等待（秒）
-T_FIRE_INTERVAL = 1.0     # 点射间隔（秒）
-T_CLEAR = 2.0             # 连续多久看不到人算离开（秒）
-LOOP_DT = 0.05            # 主循环周期（秒）
-LOG_HEARTBEAT_S = 1.0     # 控制台周期状态间隔（秒）；0=关闭心跳
-
-# --- 云台姿态 / 扫描（按「转几圈」结束，不用总时长参数）---
-PITCH_LINE = -20          # 巡线俯仰（低头看线）
-PITCH_SCAN = 5            # 扫人俯仰（略抬头）
-# 扫描角速度 °/s：180 → 约 2s/圈；150 → 约 2.4s/圈（4s/圈偏慢，故默认 180）
+PITCH_LINE = -20
+PITCH_SCAN = 5
 SCAN_YAW_SPEED = 180.0
-# 转满几圈无人则回 PATROL：1=快扫，2=更仔细
 SCAN_TURNS = 1
 
-# --- 循线 ---
-LINE_SPEED = 0.35         # 巡线前进速度 m/s
-LINE_PID_KP = 80.0        # 循线转向 P（轮速差）
-LINE_PID_OUT_MAX = 80.0   # 轮速修正限幅
+LINE_SPEED = 0.35
+LINE_PID_KP = 80.0
+LINE_PID_OUT_MAX = 80.0
 
-# --- 瞄准 PID（误差 = 目标中心相对画面中心，约 -0.5~0.5）---
 AIM_YAW_KP = 180.0
 AIM_YAW_KI = 0.0
 AIM_YAW_KD = 8.0
-AIM_YAW_OUT_MAX = 120.0   # 云台 yaw 速度限幅 °/s
-
+AIM_YAW_OUT_MAX = 120.0
 AIM_PITCH_KP = 120.0
 AIM_PITCH_KI = 0.0
 AIM_PITCH_KD = 6.0
 AIM_PITCH_OUT_MAX = 80.0
-
-# 认为“已对准”的误差阈值（归一化画面坐标）
 AIM_OK_ERR = 0.08
 
-# --- 开关 ---
-ENABLE_FIRE = True        # 无弹也可 True，只测开火逻辑
-# 无蓝线时：默认停车原地 SCAN（不必再关 ENABLE_LINE）；仅调试可设 False 强制当“无线”
+ENABLE_FIRE = True
 FORCE_NO_LINE = False
-
-# --- 灯 ---
 FLASH_HZ = 4
 
-
 # =============================================================================
-# 2. 状态与全局变量
+# STATE
 # =============================================================================
-
 STATE_INIT = 0
 STATE_PATROL = 1
 STATE_SCAN = 2
@@ -80,29 +50,23 @@ STATE_FIRE = 4
 STATE_RECOVER = 5
 
 g_state = STATE_INIT
-g_state_t0 = 0.0          # 进入当前状态时的程序运行时间
-g_no_person_t0 = 0.0      # 开始连续丢人的时间
+g_state_t0 = 0.0
+g_no_person_t0 = 0.0
 g_last_fire_t = 0.0
-g_patrol_line_t0 = 0.0    # 开始连续“有线循线”的时间；丢线则清零
-g_scan_deg_done = 0.0     # 本轮 SCAN 已转过的角度（度）
-g_last_hb_t = 0.0         # 上次心跳日志时间
-g_fire_count = 0          # 本轮锁定以来开火次数（调试）
-
-# 软件 PID 状态：yaw
+g_patrol_line_t0 = 0.0
+g_scan_deg_done = 0.0
+g_last_hb_t = 0.0
+g_fire_count = 0
 g_iy = 0.0
 g_ey_prev = 0.0
-# pitch
 g_ip = 0.0
 g_ep_prev = 0.0
 
-
 # =============================================================================
-# 3. 控制台日志 / 时间 / 限幅 / PID
+# LOG / MATH
 # =============================================================================
-
 def now_s():
     return tools.run_time_of_program()
-
 
 def state_name(s):
     if s == STATE_INIT:
@@ -119,65 +83,13 @@ def state_name(s):
         return "RECOVER"
     return "S?" + str(s)
 
-
 def log(msg):
-    """输出到 App 实验室控制台（无文件日志时的主调试手段）。"""
     t = 0.0
     try:
         t = now_s()
     except Exception:
         t = 0.0
-    # 实验室 Python 兼容：用 % 格式化
     print("[LG t=%.1f %s] %s" % (t, state_name(g_state), msg))
-
-
-def log_heartbeat():
-    """周期性摘要，避免刷屏。"""
-    global g_last_hb_t
-    if LOG_HEARTBEAT_S <= 0:
-        return
-    t = now_s()
-    if g_last_hb_t > 0 and (t - g_last_hb_t) < LOG_HEARTBEAT_S:
-        return
-    g_last_hb_t = t
-
-    has_line = False
-    has_p = False
-    px = 0.0
-    py = 0.0
-    try:
-        has_line = line_seen()
-    except Exception:
-        has_line = False
-    try:
-        ok, px, py, w, h = people_get_first()
-        has_p = ok
-    except Exception:
-        has_p = False
-
-    extra = ""
-    if g_state == STATE_PATROL:
-        age = 0.0
-        if g_patrol_line_t0 > 0:
-            age = t - g_patrol_line_t0
-        extra = " line=%s patrol_line=%.1f/%.1fs" % (str(has_line), age, T_MOVE)
-    elif g_state == STATE_SCAN:
-        need = scan_degrees_needed()
-        pct = 0.0
-        if need > 0:
-            pct = 100.0 * g_scan_deg_done / need
-        extra = " scan_deg=%.0f/%.0f (%.0f%%) person=%s" % (
-            g_scan_deg_done, need, pct, str(has_p)
-        )
-    elif g_state == STATE_LOCK or g_state == STATE_FIRE:
-        extra = " person=%s xy=(%.2f,%.2f) age=%.1fs fires=%d" % (
-            str(has_p), px, py, state_age(), g_fire_count
-        )
-    else:
-        extra = " line=%s person=%s age=%.1fs" % (str(has_line), str(has_p), state_age())
-
-    log("HB" + extra)
-
 
 def clamp(v, lo, hi):
     if v < lo:
@@ -186,6 +98,11 @@ def clamp(v, lo, hi):
         return hi
     return v
 
+def state_age():
+    return now_s() - g_state_t0
+
+def scan_degrees_needed():
+    return 360.0 * SCAN_TURNS
 
 def pid_reset_aim():
     global g_iy, g_ey_prev, g_ip, g_ep_prev
@@ -194,11 +111,8 @@ def pid_reset_aim():
     g_ip = 0.0
     g_ep_prev = 0.0
 
-
 def pid_step(err, i_acc, e_prev, kp, ki, kd, out_max, dt):
-    """返回 (output, new_i, new_e_prev)"""
     i_new = i_acc + err * dt
-    # 简单抗饱和
     i_new = clamp(i_new, -2.0, 2.0)
     if dt > 0.0001:
         d = (err - e_prev) / dt
@@ -208,42 +122,33 @@ def pid_step(err, i_acc, e_prev, kp, ki, kd, out_max, dt):
     out = clamp(out, -out_max, out_max)
     return out, i_new, err
 
-
 # =============================================================================
-# 4. 灯效
+# LED
 # =============================================================================
-
 def leds_normal():
     led_ctrl.set_bottom_led(rm_define.armor_bottom_all, 0, 80, 255, rm_define.effect_always_on)
     led_ctrl.set_top_led(rm_define.armor_top_all, 0, 80, 255, rm_define.effect_always_on)
-
 
 def leds_alert_red():
     led_ctrl.set_bottom_led(rm_define.armor_bottom_all, 255, 0, 0, rm_define.effect_flash)
     led_ctrl.set_top_led(rm_define.armor_top_all, 255, 0, 0, rm_define.effect_flash)
     led_ctrl.set_flash(rm_define.armor_all, FLASH_HZ)
 
-
 def leds_off():
     led_ctrl.turn_off(rm_define.armor_all)
 
-
 # =============================================================================
-# 5. 行人检测
+# VISION: people / line
 # =============================================================================
-
 def people_get_first():
-    """
-    返回 (ok, x, y, w, h)
-    x,y 为行人中心在视野中的归一化坐标，约 0~1，画面中心约 0.5
-    """
     info = vision_ctrl.get_people_detection_info()
-    # 兼容 list / RmList：第 1 项数量 N，随后每组 X,Y,W,H
     try:
         n = info[0]
     except Exception:
         return False, 0.5, 0.5, 0.0, 0.0
-    if n is None or n < 1:
+    if n is None:
+        return False, 0.5, 0.5, 0.0, 0.0
+    if n < 1:
         return False, 0.5, 0.5, 0.0, 0.0
     try:
         x = info[1]
@@ -254,77 +159,14 @@ def people_get_first():
         return False, 0.5, 0.5, 0.0, 0.0
     return True, x, y, w, h
 
-
 def people_seen():
     ok, x, y, w, h = people_get_first()
     return ok
 
-
-# =============================================================================
-# 6. 云台：巡线俯仰 / 扫描 / PID 瞄准
-# =============================================================================
-
-def gimbal_set_pitch_line():
-    gimbal_ctrl.pitch_ctrl(PITCH_LINE)
-
-
-def gimbal_set_pitch_scan():
-    gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
-
-
-def gimbal_stop():
-    gimbal_ctrl.stop()
-
-
-def aim_pid_towards_person(dt):
-    """
-    用 PID 驱动云台，使人中心靠近画面中心。
-    返回 (aligned, has_person)
-    """
-    global g_iy, g_ey_prev, g_ip, g_ep_prev
-    ok, x, y, w, h = people_get_first()
-    if not ok:
-        gimbal_stop()
-        return False, False
-
-    # 误差：目标在右侧 x>0.5 → 需要云台右转（正 yaw 速度）
-    err_yaw = x - 0.5
-    # y 向下增大时：人偏下 y>0.5 → 需要低头（负 pitch 速度）
-    err_pitch = y - 0.5
-
-    yaw_spd, g_iy, g_ey_prev = pid_step(
-        err_yaw, g_iy, g_ey_prev,
-        AIM_YAW_KP, AIM_YAW_KI, AIM_YAW_KD, AIM_YAW_OUT_MAX, dt
-    )
-    pitch_spd, g_ip, g_ep_prev = pid_step(
-        err_pitch, g_ip, g_ep_prev,
-        AIM_PITCH_KP, AIM_PITCH_KI, AIM_PITCH_KD, AIM_PITCH_OUT_MAX, dt
-    )
-
-    # 官方：yaw 正=右，pitch 正=上；人偏下要负 pitch
-    gimbal_ctrl.rotate_with_speed(yaw_spd, -pitch_spd)
-
-    aligned = (abs(err_yaw) < AIM_OK_ERR) and (abs(err_pitch) < AIM_OK_ERR)
-    return aligned, True
-
-
-# =============================================================================
-# 7. 底盘 / 循线
-# =============================================================================
-
-def chassis_halt():
-    chassis_ctrl.stop()
-
-
 def line_info_raw():
     return vision_ctrl.get_line_detection_info()
 
-
 def line_seen():
-    """
-    是否看到蓝线。FORCE_NO_LINE 时强制 False。
-    线信息格式因固件略有差异：常见 info[2]>=1 表示有线。
-    """
     if FORCE_NO_LINE:
         return False
     info = line_info_raw()
@@ -339,7 +181,6 @@ def line_seen():
             return True
     except Exception:
         return False
-    # 兜底：有足够长度且 index19 像 0~1 的中心值
     try:
         if n >= 20:
             cx = info[19]
@@ -349,39 +190,89 @@ def line_seen():
         pass
     return False
 
+def log_heartbeat():
+    global g_last_hb_t
+    if LOG_HEARTBEAT_S <= 0:
+        return
+    t = now_s()
+    if g_last_hb_t > 0 and (t - g_last_hb_t) < LOG_HEARTBEAT_S:
+        return
+    g_last_hb_t = t
+    has_line = False
+    has_p = False
+    px = 0.0
+    py = 0.0
+    try:
+        has_line = line_seen()
+    except Exception:
+        has_line = False
+    try:
+        ok, px, py, w, h = people_get_first()
+        has_p = ok
+    except Exception:
+        has_p = False
+    extra = ""
+    if g_state == STATE_PATROL:
+        age = 0.0
+        if g_patrol_line_t0 > 0:
+            age = t - g_patrol_line_t0
+        extra = " line=%s follow=%.1f/%.1fs" % (str(has_line), age, T_MOVE)
+    elif g_state == STATE_SCAN:
+        need = scan_degrees_needed()
+        pct = 0.0
+        if need > 0:
+            pct = 100.0 * g_scan_deg_done / need
+        extra = " deg=%.0f/%.0f pct=%.0f person=%s" % (g_scan_deg_done, need, pct, str(has_p))
+    elif g_state == STATE_LOCK or g_state == STATE_FIRE:
+        extra = " person=%s xy=(%.2f,%.2f) age=%.1f fires=%d" % (str(has_p), px, py, state_age(), g_fire_count)
+    else:
+        extra = " line=%s person=%s age=%.1f" % (str(has_line), str(has_p), state_age())
+    log("HB" + extra)
+
+# =============================================================================
+# GIMBAL / CHASSIS / FIRE
+# =============================================================================
+def gimbal_set_pitch_line():
+    gimbal_ctrl.pitch_ctrl(PITCH_LINE)
+
+def gimbal_set_pitch_scan():
+    gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
+
+def gimbal_stop():
+    gimbal_ctrl.stop()
+
+def chassis_halt():
+    chassis_ctrl.stop()
+
+def aim_pid_towards_person(dt):
+    global g_iy, g_ey_prev, g_ip, g_ep_prev
+    ok, x, y, w, h = people_get_first()
+    if ok == False:
+        gimbal_stop()
+        return False, False
+    err_yaw = x - 0.5
+    err_pitch = y - 0.5
+    yaw_spd, g_iy, g_ey_prev = pid_step(err_yaw, g_iy, g_ey_prev, AIM_YAW_KP, AIM_YAW_KI, AIM_YAW_KD, AIM_YAW_OUT_MAX, dt)
+    pitch_spd, g_ip, g_ep_prev = pid_step(err_pitch, g_ip, g_ep_prev, AIM_PITCH_KP, AIM_PITCH_KI, AIM_PITCH_KD, AIM_PITCH_OUT_MAX, dt)
+    gimbal_ctrl.rotate_with_speed(yaw_spd, -pitch_spd)
+    aligned = False
+    if abs(err_yaw) < AIM_OK_ERR and abs(err_pitch) < AIM_OK_ERR:
+        aligned = True
+    return aligned, True
 
 def line_follow_step():
-    """
-    根据线识别信息做简单 P 循线。
-    线信息：常见 info[19] 为线中心 x（0~1）。
-    """
     info = line_info_raw()
     vx = LINE_SPEED
     yaw_rate = 0.0
-
     try:
-        n = 0
-        try:
-            n = len(info)
-        except Exception:
-            n = 0
+        n = len(info)
         if n >= 20:
             cx = info[19]
             err = cx - 0.5
             yaw_rate = clamp(-err * LINE_PID_KP, -LINE_PID_OUT_MAX, LINE_PID_OUT_MAX)
     except Exception:
         yaw_rate = 0.0
-
     chassis_ctrl.move_with_speed(vx, 0, yaw_rate)
-
-
-def scan_degrees_needed():
-    return 360.0 * SCAN_TURNS
-
-
-# =============================================================================
-# 8. 射击
-# =============================================================================
 
 def fire_once_safe():
     global g_fire_count
@@ -389,32 +280,24 @@ def fire_once_safe():
         gun_ctrl.set_fire_count(1)
         gun_ctrl.fire_once()
         g_fire_count = g_fire_count + 1
-        log("FIRE_ONCE count=%d ENABLE_FIRE=1" % g_fire_count)
+        log("FIRE_ONCE count=%d" % g_fire_count)
     else:
-        log("FIRE_SKIP (ENABLE_FIRE=0)")
-
+        log("FIRE_SKIP ENABLE_FIRE=0")
 
 def fire_stop():
     gun_ctrl.stop()
 
-
 # =============================================================================
-# 9. 状态切换
+# STATE MACHINE
 # =============================================================================
-
-def set_state(s, reason=""):
+def set_state(s, reason):
     global g_state, g_state_t0, g_no_person_t0, g_last_fire_t
     global g_patrol_line_t0, g_scan_deg_done, g_fire_count
     old = g_state
     g_state = s
     g_state_t0 = now_s()
     g_no_person_t0 = now_s()
-
-    why = reason
-    if why == "":
-        why = "-"
-    log("STATE %s -> %s | %s" % (state_name(old), state_name(s), why))
-
+    log("STATE %s -> %s | %s" % (state_name(old), state_name(s), reason))
     if s == STATE_PATROL:
         fire_stop()
         chassis_halt()
@@ -424,19 +307,15 @@ def set_state(s, reason=""):
         g_patrol_line_t0 = 0.0
         g_fire_count = 0
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
-
-    elif s == STATE_SCAN:
+    if s == STATE_SCAN:
         fire_stop()
         chassis_halt()
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         gimbal_set_pitch_scan()
         g_scan_deg_done = 0.0
         leds_normal()
-        log("SCAN start turns=%d speed=%.0f deg/s need=%.0f deg" % (
-            SCAN_TURNS, SCAN_YAW_SPEED, scan_degrees_needed()
-        ))
-
-    elif s == STATE_LOCK:
+        log("SCAN turns=%d speed=%.0f need=%.0f" % (SCAN_TURNS, SCAN_YAW_SPEED, scan_degrees_needed()))
+    if s == STATE_LOCK:
         chassis_halt()
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         gimbal_set_pitch_scan()
@@ -445,122 +324,85 @@ def set_state(s, reason=""):
         g_no_person_t0 = now_s()
         g_fire_count = 0
         ok, x, y, w, h = people_get_first()
-        log("LOCK person ok=%s xy=(%.2f,%.2f) wh=(%.2f,%.2f)" % (
-            str(ok), x, y, w, h
-        ))
-
-    elif s == STATE_FIRE:
+        log("LOCK ok=%s xy=(%.2f,%.2f)" % (str(ok), x, y))
+    if s == STATE_FIRE:
         chassis_halt()
         pid_reset_aim()
         leds_alert_red()
         g_last_fire_t = 0.0
-        log("FIRE mode enter (warn wait done), interval=%.1fs" % T_FIRE_INTERVAL)
-
-    elif s == STATE_RECOVER:
+        log("FIRE enter interval=%.1f" % T_FIRE_INTERVAL)
+    if s == STATE_RECOVER:
         fire_stop()
         chassis_halt()
         gimbal_stop()
         gimbal_set_pitch_line()
         leds_normal()
-        log("RECOVER: lost person, back to line pitch")
-
-
-def state_age():
-    return now_s() - g_state_t0
-
-
-# =============================================================================
-# 10. 各状态 tick
-# =============================================================================
+        log("RECOVER")
 
 def tick_patrol():
     global g_patrol_line_t0
-
     if people_seen():
-        log("PATROL: person seen -> LOCK")
-        set_state(STATE_LOCK, "person_seen_on_patrol")
+        log("PATROL person -> LOCK")
+        set_state(STATE_LOCK, "person_on_patrol")
         return
-
-    # 默认：没线 → 原地 SCAN（停车扫一圈/两圈）
-    if not line_seen():
+    if line_seen() == False:
         g_patrol_line_t0 = 0.0
         chassis_halt()
-        set_state(STATE_SCAN, "no_line_scan_in_place")
+        set_state(STATE_SCAN, "no_line")
         return
-
-    # 有线：累积循线时间，满 T_MOVE 再 SCAN
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
-        log("PATROL: line acquired, follow for %.1fs" % T_MOVE)
+        log("PATROL line ok, follow %.1fs" % T_MOVE)
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
         g_patrol_line_t0 = 0.0
-        set_state(STATE_SCAN, "line_follow_time_up")
-
+        set_state(STATE_SCAN, "follow_time_up")
 
 def tick_scan():
     global g_scan_deg_done
-
     chassis_halt()
-
     if people_seen():
         gimbal_stop()
-        log("SCAN: person seen -> LOCK")
-        set_state(STATE_LOCK, "person_seen_on_scan")
+        log("SCAN person -> LOCK")
+        set_state(STATE_LOCK, "person_on_scan")
         return
-
-    # 匀速转：累计角度 = 速度 * dt；转满 SCAN_TURNS 圈结束
     spd = SCAN_YAW_SPEED
     if spd < 1.0:
         spd = 1.0
     g_scan_deg_done = g_scan_deg_done + spd * LOOP_DT
     gimbal_ctrl.rotate_with_speed(spd, 0)
-
     if g_scan_deg_done >= scan_degrees_needed():
         gimbal_stop()
-        log("SCAN: full turns done, no person -> PATROL")
-        set_state(STATE_PATROL, "scan_turns_complete")
-
+        log("SCAN done -> PATROL")
+        set_state(STATE_PATROL, "scan_complete")
 
 def tick_lock():
     global g_no_person_t0
-
     chassis_halt()
     aligned, has = aim_pid_towards_person(LOOP_DT)
-
-    if not has:
+    if has == False:
         lost = now_s() - g_no_person_t0
         if lost >= T_CLEAR:
-            log("LOCK: person lost for %.1fs -> RECOVER" % lost)
+            log("LOCK lost person -> RECOVER")
             set_state(STATE_RECOVER, "person_lost")
         return
-
-    # 仍看见人，刷新丢人计时
     g_no_person_t0 = now_s()
-
-    # 锁定满 3s → 开火（对准过程中也计时；更严可要求 aligned）
     if state_age() >= T_WARN_BEFORE_FIRE:
-        log("LOCK: age>=%.1fs aligned=%s -> FIRE" % (T_WARN_BEFORE_FIRE, str(aligned)))
+        log("LOCK time up aligned=%s -> FIRE" % str(aligned))
         set_state(STATE_FIRE, "warn_time_up")
-
 
 def tick_fire():
     global g_no_person_t0, g_last_fire_t
-
     chassis_halt()
     aligned, has = aim_pid_towards_person(LOOP_DT)
-
     if has == False:
         lost_t = now_s() - g_no_person_t0
         if lost_t >= T_CLEAR:
             fire_stop()
-            log("FIRE: person lost -> RECOVER")
-            set_state(STATE_RECOVER, "person_lost_while_firing")
+            log("FIRE lost person -> RECOVER")
+            set_state(STATE_RECOVER, "person_lost_fire")
         return
-
     g_no_person_t0 = now_s()
-
-    # 持续 PID 对准的同时按间隔点射
     t = now_s()
     need_fire = False
     if g_last_fire_t <= 0.0:
@@ -571,46 +413,36 @@ def tick_fire():
         fire_once_safe()
         g_last_fire_t = t
 
-
 def tick_recover():
     chassis_halt()
     gimbal_set_pitch_line()
     if state_age() >= 0.8:
         set_state(STATE_PATROL, "recover_done")
 
-
 # =============================================================================
-# 11. 初始化与主循环
+# ENTRY
 # =============================================================================
-
 def setup():
     log("setup begin")
     robot_ctrl.set_mode(rm_define.robot_mode_free)
     chassis_halt()
     gimbal_ctrl.recenter()
     time.sleep(0.3)
-
     vision_ctrl.enable_detection(rm_define.vision_detection_people)
     vision_ctrl.enable_detection(rm_define.vision_detection_line)
     vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
     media_ctrl.exposure_value_update(rm_define.exposure_value_medium)
-
     gun_ctrl.set_fire_count(1)
     leds_normal()
     gimbal_set_pitch_line()
-    log("setup done T_MOVE=%.1f TURNS=%d SPEED=%.0f FIRE=%s" % (
-        T_MOVE, SCAN_TURNS, SCAN_YAW_SPEED, str(ENABLE_FIRE)
-    ))
-
+    log("setup done move=%.1f turns=%d spd=%.0f fire=%s" % (T_MOVE, SCAN_TURNS, SCAN_YAW_SPEED, str(ENABLE_FIRE)))
 
 def start():
-    """App 实验室入口。粘贴时请全选覆盖，勿混入旧代码。"""
     global g_state
-    print("======== Line Guard v1 start ========")
-    log("program start()")
+    print("======== Line Guard v1.1 start ========")
+    log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
-
     while True:
         if g_state == STATE_PATROL:
             tick_patrol()
@@ -623,8 +455,7 @@ def start():
         elif g_state == STATE_RECOVER:
             tick_recover()
         else:
-            log("unknown state, reset PATROL")
-            set_state(STATE_PATROL, "unknown_state")
-
+            log("bad state reset")
+            set_state(STATE_PATROL, "bad_state")
         log_heartbeat()
         time.sleep(LOOP_DT)
