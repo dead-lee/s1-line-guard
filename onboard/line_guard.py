@@ -1,31 +1,39 @@
-# LINE_GUARD_VERSION=1.4.0 stamp=2026-08-02 11:26:20  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.5.0 stamp=2026-08-02 11:45:06  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.4 — 单文件，整段粘贴进 App 实验室 Python
+# S1 Line Guard v1.5 — 单文件，整段粘贴进 App 实验室 Python
 #
-# SCAN: 正转 360° + 反转 360°（基于云台实际 yaw 累计，非 speed*dt 开环）
-#       队列扫完后 recenter（应较快），再判断有线->PATROL / 无线->再 SCAN
-# 打断: 见人->LOCK（允许）；人离开后按「打断时所在圈」续扫：
-#   - 第1圈被打断: 补完第1圈剩余 + 反向整圈 -> 找线
-#   - 第2圈被打断: 补完第2圈剩余 + 重新一正一反两圈 -> 找线
-#   - 无 SCAN 上下文(如巡逻中见人): 离开后完整一正一反 -> 找线
-# 线: 多帧确认才进入/离开 PATROL
-# 射击: 示警只一次；连发 1s / 停 1s
-# LOST_SCAN 中途允许再 LOCK
+# 重要：S1 云台 yaw 约 ±250°，不能连续转满物理 360°。
+# 日志卡死：target=195 时 yaw 停在 255，acc 不再增加。
+#
+# SCAN「一正一反」= 扫到右软限位 + 扫到左软限位（用实际 yaw 判断到位）：
+#   正转: rotate 直到 yaw >= +YAW_LIM 或卡住
+#   反转: rotate 直到 yaw <= -YAW_LIM 或卡住
+# 队列结束后 recenter，再判线。
+#
+# 打断续扫（人离开后 LOST_SCAN，仍允许中途再 LOCK）：
+#   - 正转段被打断: 继续扫到右限 + 再反转到左限
+#   - 反转段被打断: 继续扫到左限 + 再完整一正一反
+#   - 无断点: 完整一正一反
+# 线: 多帧确认；射击: 示警一次 + 连发1s/停1s
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 T_MOVE = 3.0
-T_CLEAR = 0.8
-PERSON_MISS_NEED = 6
+T_CLEAR = 1.0
+PERSON_MISS_NEED = 10
 LOOP_DT = 0.05
 LOG_HEARTBEAT_S = 1.0
 
 PITCH_LINE = -20
 PITCH_SCAN = 5
-# 扫速：在仍能检出人的前提下偏快；实机可按 logs 再调 200~260
-SCAN_YAW_SPEED = 230.0
-SCAN_PASS_DEG = 360.0
+# 扫速偏快；到位看实际 yaw，不靠 360 累计
+SCAN_YAW_SPEED = 240.0
+# 软限位（略小于硬件约 ±250，避免顶死）
+YAW_LIM = 230.0
+YAW_ARRIVE = 8.0
+# 连续多少帧 yaw 几乎不动则视为到限位/卡住，结束本段
+SCAN_STUCK_FRAMES = 12
 
 LINE_SPEED = 0.35
 LINE_PID_KP = 80.0
@@ -35,17 +43,17 @@ LINE_CONFIRM_FRAMES = 8
 AIM_YAW_KP = 90.0
 AIM_YAW_KI = 0.0
 AIM_YAW_KD = 25.0
-AIM_YAW_OUT_MAX = 80.0
-AIM_PITCH_KP = 70.0
+AIM_YAW_OUT_MAX = 55.0
+AIM_PITCH_KP = 55.0
 AIM_PITCH_KI = 0.0
-AIM_PITCH_KD = 20.0
-AIM_PITCH_OUT_MAX = 50.0
-AIM_DEADZONE = 0.06
-AIM_OK_ERR = 0.08
+AIM_PITCH_KD = 18.0
+AIM_PITCH_OUT_MAX = 35.0
+AIM_DEADZONE = 0.08
+AIM_OK_ERR = 0.10
 PERSON_MIN_W = 0.06
 PERSON_MIN_H = 0.08
 
-T_AIM_BEFORE_IR = 1.0
+T_AIM_BEFORE_IR = 1.2
 T_BURST_ON = 1.0
 T_BURST_OFF = 1.0
 
@@ -88,18 +96,14 @@ g_ep_prev = 0.0
 g_line_hit = 0
 g_line_miss = 0
 
-# SCAN 运行时
+# SCAN 运行时：队列元素为转向 dir (+1 右/-1 左)，扫到对应软限位
 g_scan_queue = []
 g_scan_qi = 0
 g_scan_dir = 1
-g_scan_target = 360.0
-g_scan_acc = 0.0
 g_scan_last_yaw = 0.0
-g_scan_phase_idx = 0
-# 打断保存
+g_scan_stuck = 0
+# 打断保存：只记转向
 g_brk_valid = False
-g_brk_phase_idx = 0
-g_brk_remaining = 0.0
 g_brk_dir = 1
 
 # =============================================================================
@@ -311,8 +315,8 @@ def log_heartbeat():
             age = t - g_patrol_line_t0
         extra = " lineHit=%d miss=%d follow=%.1f" % (g_line_hit, g_line_miss, age)
     elif g_state == STATE_SCAN or g_state == STATE_LOST_SCAN:
-        extra = " qi=%d phase=%d acc=%.0f/%.0f dir=%d yaw=%.0f person=%s" % (
-            g_scan_qi, g_scan_phase_idx, g_scan_acc, g_scan_target, g_scan_dir, get_yaw(), str(has_p)
+        extra = " qi=%d/%d dir=%d yaw=%.0f lim=%.0f stuck=%d person=%s" % (
+            g_scan_qi, len(g_scan_queue), g_scan_dir, get_yaw(), YAW_LIM, g_scan_stuck, str(has_p)
         )
     elif g_state == STATE_LOCK or g_state == STATE_FIRE:
         extra = " person=%s miss=%d xy=(%.2f,%.2f) phase=%d ir=%s" % (
@@ -407,56 +411,44 @@ def fire_bead_burst_stop():
     log("BURST_OFF wait 1s")
 
 # =============================================================================
-# SCAN 队列（基于实际 yaw）
+# SCAN：扫到软限位（非物理 360°，因 yaw≈±250）
+# 队列元素仅为 dir: +1 扫到 +YAW_LIM，-1 扫到 -YAW_LIM
 # =============================================================================
 def scan_queue_full_cw_ccw():
-    """标准一正一反。"""
-    return [(1, SCAN_PASS_DEG), (-1, SCAN_PASS_DEG)]
+    return [1, -1]
 
 def scan_save_breakpoint():
-    """进入 LOCK 前保存当前扫描进度。"""
-    global g_brk_valid, g_brk_phase_idx, g_brk_remaining, g_brk_dir
-    rem = g_scan_target - g_scan_acc
-    if rem < 0.0:
-        rem = 0.0
+    global g_brk_valid, g_brk_dir
     g_brk_valid = True
-    g_brk_phase_idx = g_scan_phase_idx
-    g_brk_remaining = rem
     g_brk_dir = g_scan_dir
-    log("BRK save phase=%d rem=%.0f dir=%d" % (g_brk_phase_idx, g_brk_remaining, g_brk_dir))
+    log("BRK save dir=%d yaw=%.0f" % (g_brk_dir, get_yaw()))
 
 def scan_queue_after_lost():
-    """
-    人离开后的扫描队列（按打断时的转向 dir 判断第几圈）：
-    - 无断点: 完整一正一反
-    - 正转圈(dir>0)被打断: 剩余正转 + 反向整圈
-    - 反转圈(dir<0)被打断: 剩余反转 + 重新一正一反两圈
-    """
     if g_brk_valid == False:
-        log("LOST queue: full cw+ccw (no brk)")
-        return scan_queue_full_cw_ccw()
-    rem = g_brk_remaining
-    if rem < 5.0:
-        rem = 5.0
+        log("LOST queue: full +lim then -lim")
+        return [1, -1]
     if g_brk_dir > 0:
-        log("LOST queue: finish CW rem=%.0f + full reverse" % rem)
-        return [(1, rem), (-1, SCAN_PASS_DEG)]
-    log("LOST queue: finish CCW rem=%.0f + full cw+ccw" % rem)
-    return [(-1, rem), (1, SCAN_PASS_DEG), (-1, SCAN_PASS_DEG)]
+        log("LOST queue: finish +lim then -lim")
+        return [1, -1]
+    log("LOST queue: finish -lim then full +lim/-lim")
+    return [-1, 1, -1]
+
+def scan_at_limit(dir_s):
+    yaw = get_yaw()
+    if dir_s > 0:
+        return yaw >= (YAW_LIM - YAW_ARRIVE)
+    return yaw <= (-YAW_LIM + YAW_ARRIVE)
 
 def scan_load_segment(qi):
-    """装载队列第 qi 段，重置实际转角累计。"""
-    global g_scan_qi, g_scan_dir, g_scan_target, g_scan_acc, g_scan_last_yaw, g_scan_phase_idx
+    global g_scan_qi, g_scan_dir, g_scan_last_yaw, g_scan_stuck
     g_scan_qi = qi
-    d, deg = g_scan_queue[qi]
-    g_scan_dir = d
-    g_scan_target = deg
-    g_scan_acc = 0.0
+    g_scan_dir = g_scan_queue[qi]
     g_scan_last_yaw = get_yaw()
-    g_scan_phase_idx = qi
-    # 若队列长于 2，phase_idx 仅用于断点语义：0=正转段，>=1=反转段
-    # 对「补完+完整两圈」队列，第 0 段可能是反转剩余，用 dir 区分更准
-    log("SCAN seg qi=%d dir=%d target=%.0f yaw0=%.0f" % (qi, d, deg, g_scan_last_yaw))
+    g_scan_stuck = 0
+    if g_scan_dir > 0:
+        log("SCAN seg qi=%d dir=+1 to +%.0f yaw0=%.0f" % (qi, YAW_LIM, g_scan_last_yaw))
+    else:
+        log("SCAN seg qi=%d dir=-1 to -%.0f yaw0=%.0f" % (qi, YAW_LIM, g_scan_last_yaw))
 
 def scan_start_queue(queue, reason):
     global g_scan_queue
@@ -471,34 +463,29 @@ def scan_start_queue(queue, reason):
 
 def scan_tick_turn():
     """
-    用实际 yaw 差分累计转角；达到 target 返回 True。
+    向软限位转动；到位或卡住则返回 True。
     """
-    global g_scan_acc, g_scan_last_yaw
+    global g_scan_last_yaw, g_scan_stuck
     yaw = get_yaw()
+    if scan_at_limit(g_scan_dir):
+        log("SCAN hit lim yaw=%.0f dir=%d" % (yaw, g_scan_dir))
+        return True
     d = yaw - g_scan_last_yaw
-    # 有限行程内短差分；滤反向噪声
-    if g_scan_dir > 0:
-        if d < 0.0:
-            d = 0.0
-        g_scan_acc = g_scan_acc + d
+    if abs(d) < 0.4:
+        g_scan_stuck = g_scan_stuck + 1
     else:
-        if d > 0.0:
-            d = 0.0
-        g_scan_acc = g_scan_acc + (-d)
+        g_scan_stuck = 0
     g_scan_last_yaw = yaw
+    if g_scan_stuck >= SCAN_STUCK_FRAMES:
+        log("SCAN stuck at yaw=%.0f treat as lim dir=%d" % (yaw, g_scan_dir))
+        return True
     spd = SCAN_YAW_SPEED
     if spd < 1.0:
         spd = 1.0
     gimbal_ctrl.rotate_with_speed(g_scan_dir * spd, 0)
-    if g_scan_acc >= g_scan_target:
-        return True
     return False
 
 def scan_advance_or_finish():
-    """
-    当前段完成：下一段或整队结束。
-    返回 "next" | "done"
-    """
     global g_scan_qi
     gimbal_stop()
     nq = len(g_scan_queue)
@@ -509,13 +496,11 @@ def scan_advance_or_finish():
     return "done"
 
 def scan_finish_recenter():
-    """队列扫完后 recenter，保证姿态基准（应较快）。"""
     gimbal_stop()
     log("SCAN recenter after full queue")
     gimbal_ctrl.recenter()
-    time.sleep(0.2)
+    time.sleep(0.25)
     gimbal_set_pitch_line()
-
 # =============================================================================
 # STATE MACHINE
 # =============================================================================
@@ -644,7 +629,7 @@ def tick_scan_common(is_lost):
     if done_seg == False:
         return
     # 当前段完成
-    log("SCAN seg done acc=%.0f target=%.0f" % (g_scan_acc, g_scan_target))
+    log("SCAN seg done yaw=%.0f dir=%d" % (get_yaw(), g_scan_dir))
     adv = scan_advance_or_finish()
     if adv == "next":
         return
@@ -774,7 +759,7 @@ def setup():
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.4.0 stamp=2026-08-02 11:26:20")
+    print("# LINE_GUARD_VERSION=1.5.0 stamp=2026-08-02 11:45:06")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
