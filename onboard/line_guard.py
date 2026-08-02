@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.5.0 stamp=2026-08-02 11:45:06  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.5.0 stamp=2026-08-02 11:45:24  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard v1.5 — 单文件，整段粘贴进 App 实验室 Python
 #
@@ -754,12 +754,12 @@ def setup():
     leds_normal()
     gimbal_set_pitch_line()
     pid_reset_aim()
-    log("setup done v1.4.0 yaw-scan + line confirm + single IR")
+    log("setup done v1.5.0 lim-scan YAW_LIM=%.0f spd=%.0f" % (YAW_LIM, SCAN_YAW_SPEED))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.5.0 stamp=2026-08-02 11:45:06")
+    print("# LINE_GUARD_VERSION=1.5.0 stamp=2026-08-02 11:45:24")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
