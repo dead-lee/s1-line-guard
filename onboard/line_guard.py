@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.9.0 stamp=2026-08-03 17:05:30  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.10.0 stamp=2026-08-03 17:16:25  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.9 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.10 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 总览：状态机
@@ -39,11 +39,17 @@
 #   - 进 LOCK：连续 PERSON_HIT_NEED=3 帧
 #   - 跟丢：连续 miss + T_CLEAR；丢检帧不立刻停云台，用上一帧位置 coast 跟瞄
 #
-# 射击：
-#   - LOCK 发现音响一次（recognize_success）
-#   - 进 FIRE 前红外 ir_blaster 示警 1 次（仅灯效，不配射击音）
-#   - 水弹 fire_continuous 连发 2s → stop → 人仍在则等 3s → 再连发 2s
-#   - 水弹段不播放 media_sound_shoot（机身自带射击声）
+# 射击（官方文档）：
+#   - gun_ctrl.fire_continuous() 全自动默认约 1 发/秒，体感不像「连发」
+#   - 因此 2s 窗口内用 fire_once 脉冲模拟连击：
+#       set_fire_count(FIRE_BEADS_PER_PULSE) + fire_once()，间隔 FIRE_PULSE_INTERVAL
+#   - LOCK 发现音 1 次；IR 示警 1 次（无射击配音）；水弹段不播 media_sound_shoot
+#   - 节奏：脉冲连击 2s → 等待 3s → 再 2s …（人确认丢失则停）
+#
+# 俯仰：
+#   - 巡线 PITCH_LINE=-20（硬件下限附近，低头看线）
+#   - 扫描 PITCH_SCAN=+20（略上扬扫人；硬件 pitch 约 -20~+35）
+#   - 回巡线/RECOVER 用 angle_ctrl(0, PITCH_LINE) 强制 yaw+pitch 到位
 #
 # =============================================================================
 
@@ -57,14 +63,15 @@ PERSON_HIT_NEED = 3
 LOOP_DT = 0.05
 LOG_HEARTBEAT_S = 1.0
 
+# 俯仰：巡线低头 / 扫描上扬（文档 pitch 范围约 -20~+35）
 PITCH_LINE = -20
-PITCH_SCAN = 10
+PITCH_SCAN = 20
 
 # --- SCAN ---
 SCAN_HALF = 180.0
 SCAN_SIDE_A = SCAN_HALF
 SCAN_SIDE_B = -SCAN_HALF
-SCAN_YAW_SPEED = 150.0
+SCAN_YAW_SPEED = 120.0
 YAW_ARRIVE = 8.0
 SCAN_STUCK_FRAMES = 12
 HOME_YAW_SPEED = 500.0
@@ -90,9 +97,13 @@ PERSON_MIN_H = 0.08
 
 # LOCK 跟瞄多久后红外示警 → FIRE
 T_AIM_BEFORE_IR = 1.2
-# 水弹：连发 2s，间隔 3s（人未离开才进入下一轮）
+# 水弹：脉冲连击 2s，间隔 3s（人未离开才进入下一轮）
 T_BURST_ON = 2.0
 T_BURST_WAIT = 3.0
+# 官方 full-auto 约 1 发/s；脉冲 fire_once 约每 0.3s 一次更像连击
+# set_fire_count 文档范围 [1,8]；每脉冲 2 发，2s 内约 6~7 次脉冲
+FIRE_PULSE_INTERVAL = 0.30
+FIRE_BEADS_PER_PULSE = 2
 
 ENABLE_FIRE = True
 FORCE_NO_LINE = False
@@ -126,6 +137,8 @@ g_fire_count = 0
 g_fire_phase = FIRE_PHASE_AIM
 g_phase_t0 = 0.0
 g_ir_done = False
+g_last_shot_t = 0.0
+g_burst_shots = 0
 g_iy = 0.0
 g_ey_prev = 0.0
 g_ip = 0.0
@@ -192,6 +205,9 @@ def phase_age():
 
 def get_yaw():
     return gimbal_ctrl.get_axis_angle(rm_define.gimbal_axis_yaw)
+
+def get_pitch():
+    return gimbal_ctrl.get_axis_angle(rm_define.gimbal_axis_pitch)
 
 def pid_reset_aim():
     global g_iy, g_ey_prev, g_ip, g_ep_prev
@@ -484,34 +500,91 @@ def log_heartbeat():
     except Exception:
         has_p = False
     extra = ""
+    try:
+        pit = get_pitch()
+    except Exception:
+        pit = 0.0
     if g_state == STATE_PATROL:
         age = 0.0
         if g_patrol_line_t0 > 0:
             age = t - g_patrol_line_t0
-        extra = " lineHit=%d miss=%d pHit=%d follow=%.1f" % (
-            g_line_hit, g_line_miss, g_person_hit, age
+        extra = " lineHit=%d miss=%d pHit=%d follow=%.1f pitch=%.0f" % (
+            g_line_hit, g_line_miss, g_person_hit, age, pit
         )
     elif g_state == STATE_SCAN or g_state == STATE_LOST_SCAN:
-        extra = " qi=%d/%d seg=%s tgt=%.0f yaw=%.0f pHit=%d person=%s" % (
+        extra = " qi=%d/%d seg=%s tgt=%.0f yaw=%.0f pitch=%.0f pHit=%d person=%s" % (
             g_scan_qi, len(g_scan_queue), g_scan_seg_name, g_scan_target_yaw,
-            get_yaw(), g_person_hit, str(has_p)
+            get_yaw(), pit, g_person_hit, str(has_p)
         )
     elif g_state == STATE_LOCK or g_state == STATE_FIRE:
-        extra = " person=%s miss=%d xy=(%.2f,%.2f) fphase=%d ir=%s" % (
-            str(has_p), g_person_miss, px, py, g_fire_phase, str(g_ir_done)
+        extra = " person=%s miss=%d xy=(%.2f,%.2f) fphase=%d ir=%s shots=%d" % (
+            str(has_p), g_person_miss, px, py, g_fire_phase, str(g_ir_done), g_burst_shots
         )
     else:
-        extra = " lineHit=%d person=%s" % (g_line_hit, str(has_p))
+        extra = " lineHit=%d person=%s pitch=%.0f" % (g_line_hit, str(has_p), pit)
     log("HB" + extra)
 
 # =============================================================================
 # ACTUATORS
 # =============================================================================
 def gimbal_set_pitch_line():
-    gimbal_ctrl.pitch_ctrl(PITCH_LINE)
+    """低头看线：绝对 pitch=PITCH_LINE（约 -20）。"""
+    set_gimbal_speed(HOME_YAW_SPEED)
+    try:
+        gimbal_ctrl.pitch_ctrl(PITCH_LINE)
+    except Exception:
+        pass
 
 def gimbal_set_pitch_scan():
-    gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
+    """扫描/跟瞄上扬：绝对 pitch=PITCH_SCAN（约 +20）。"""
+    set_gimbal_speed(HOME_YAW_SPEED)
+    try:
+        gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
+    except Exception:
+        pass
+
+def gimbal_pose_line():
+    """回巡线姿态：yaw=0 且 pitch=低头。用 angle_ctrl 一次到位更可靠。"""
+    set_gimbal_speed(HOME_YAW_SPEED)
+    try:
+        gimbal_ctrl.angle_ctrl(0, PITCH_LINE)
+    except Exception:
+        try:
+            gimbal_ctrl.yaw_ctrl(0)
+        except Exception:
+            pass
+        try:
+            gimbal_ctrl.pitch_ctrl(PITCH_LINE)
+        except Exception:
+            pass
+    time.sleep(0.12)
+    # 再确认低头（部分机上 yaw 指令后 pitch 会漂）
+    try:
+        gimbal_ctrl.pitch_ctrl(PITCH_LINE)
+    except Exception:
+        pass
+    log("POSE line yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
+
+def gimbal_pose_scan_yaw0():
+    """扫描起点：yaw=0 且 pitch=上扬。"""
+    set_gimbal_speed(HOME_YAW_SPEED)
+    try:
+        gimbal_ctrl.angle_ctrl(0, PITCH_SCAN)
+    except Exception:
+        try:
+            gimbal_ctrl.yaw_ctrl(0)
+        except Exception:
+            pass
+        try:
+            gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
+        except Exception:
+            pass
+    time.sleep(0.1)
+    try:
+        gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
+    except Exception:
+        pass
+    log("POSE scan yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
 
 def gimbal_stop():
     gimbal_ctrl.rotate_with_speed(0, 0)
@@ -574,7 +647,6 @@ def fire_ir_warn_once():
     except Exception:
         ok_ir = False
     if ok_ir == False:
-        # 无 ir_blaster 时退回水弹单发一次作示警（仍不播配音）
         gun_ctrl.set_fire_count(1)
         gun_ctrl.fire_once()
         log("IR_WARN fallback gun fire_once")
@@ -582,14 +654,55 @@ def fire_ir_warn_once():
     g_ir_done = True
 
 def fire_bead_burst_start():
-    """水弹连发开始：仅灯效，不播 media_sound_shoot。"""
+    """
+    水弹「连击」窗口开始。
+    官方 fire_continuous 默认约 1 发/秒，不够连；此处改用脉冲 fire_once。
+    """
+    global g_last_shot_t, g_burst_shots
     if ENABLE_FIRE == False:
         log("BURST_ON skip ENABLE_FIRE=0")
         return
     fx_fire_burst_led()
-    gun_ctrl.set_fire_count(1)
-    gun_ctrl.fire_continuous()
-    log("BURST_ON %.1fs" % T_BURST_ON)
+    g_last_shot_t = 0.0
+    g_burst_shots = 0
+    # 立刻打第一发，后续由 fire_bead_burst_tick 按间隔补发
+    fire_bead_pulse_once()
+    log("BURST_ON %.1fs pulse=%.2fs beads=%d" % (
+        T_BURST_ON, FIRE_PULSE_INTERVAL, FIRE_BEADS_PER_PULSE
+    ))
+
+def fire_bead_pulse_once():
+    """单次脉冲：set_fire_count + fire_once（文档 beads/time ∈ [1,8]）。"""
+    global g_last_shot_t, g_burst_shots, g_fire_count
+    if ENABLE_FIRE == False:
+        return
+    n = FIRE_BEADS_PER_PULSE
+    if n < 1:
+        n = 1
+    if n > 8:
+        n = 8
+    try:
+        gun_ctrl.set_fire_count(n)
+        gun_ctrl.fire_once()
+        g_burst_shots = g_burst_shots + 1
+        g_fire_count = g_fire_count + 1
+        g_last_shot_t = now_s()
+        log("BURST pulse #%d beads=%d" % (g_burst_shots, n))
+    except Exception:
+        log("BURST pulse fail")
+
+def fire_bead_burst_tick():
+    """
+    连击窗口内周期调用：距上次脉冲 ≥ FIRE_PULSE_INTERVAL 再 fire_once。
+    fire_once 为阻塞块，间隔取 0.30s，兼顾射速与跟瞄。
+    """
+    if ENABLE_FIRE == False:
+        return
+    if g_last_shot_t <= 0.0:
+        fire_bead_pulse_once()
+        return
+    if (now_s() - g_last_shot_t) >= FIRE_PULSE_INTERVAL:
+        fire_bead_pulse_once()
 
 def fire_bead_burst_stop():
     gun_ctrl.stop()
@@ -597,7 +710,7 @@ def fire_bead_burst_stop():
         led_ctrl.gun_led_off()
     except Exception:
         pass
-    log("BURST_STOP -> wait %.1fs" % T_BURST_WAIT)
+    log("BURST_STOP shots=%d -> wait %.1fs" % (g_burst_shots, T_BURST_WAIT))
 
 # =============================================================================
 # SCAN 核心：完整两遍 [ +180, 0, -180, 0 ]
@@ -617,39 +730,38 @@ def scan_seg_label(qi, target):
     return "qi%d_to_%+.0f" % (qi, target)
 
 def gimbal_fast_home(reason, keep_scan_pitch=False):
+    """
+    回 yaw=0。
+    keep_scan_pitch=True  → 保持/设为扫描俯仰（扫前归零）
+    keep_scan_pitch=False → 同时低头到 PITCH_LINE（扫完回巡线）
+    """
     gimbal_stop()
     fx_recenter()
     yaw0 = get_yaw()
-    log("HOME begin yaw=%.0f | %s" % (yaw0, reason))
-    set_gimbal_speed(HOME_YAW_SPEED)
+    pit0 = 0.0
     try:
-        gimbal_ctrl.yaw_ctrl(0)
+        pit0 = get_pitch()
     except Exception:
-        t0 = now_s()
-        while (now_s() - t0) < HOME_TIMEOUT_S:
-            y = get_yaw()
-            if abs(y) <= YAW_ARRIVE:
-                break
-            if y > 0:
-                gimbal_ctrl.rotate_with_speed(-min(SCAN_YAW_SPEED, 250), 0)
-            else:
-                gimbal_ctrl.rotate_with_speed(min(SCAN_YAW_SPEED, 250), 0)
-            time.sleep(LOOP_DT)
-        gimbal_stop()
-    if keep_scan_pitch == False:
+        pit0 = 0.0
+    log("HOME begin yaw=%.0f pitch=%.0f | %s" % (yaw0, pit0, reason))
+    set_gimbal_speed(HOME_YAW_SPEED)
+    if keep_scan_pitch:
+        # 扫人姿态：0 航向 + 上扬
         try:
-            gimbal_ctrl.pitch_ctrl(PITCH_LINE)
+            gimbal_ctrl.angle_ctrl(0, PITCH_SCAN)
         except Exception:
-            pass
-    time.sleep(0.08)
-    if abs(get_yaw()) > 12.0:
-        set_gimbal_speed(HOME_YAW_SPEED)
-        try:
-            gimbal_ctrl.yaw_ctrl(0)
-        except Exception:
-            pass
+            try:
+                gimbal_ctrl.yaw_ctrl(0)
+            except Exception:
+                pass
+            gimbal_set_pitch_scan()
+        time.sleep(0.1)
+        gimbal_set_pitch_scan()
+    else:
+        # 巡线姿态：0 航向 + 低头（angle_ctrl 一次锁死两轴）
+        gimbal_pose_line()
     gimbal_stop()
-    log("HOME done yaw=%.0f" % get_yaw())
+    log("HOME done yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
 
 def scan_load_segment(qi):
     global g_scan_qi, g_scan_target_yaw, g_scan_last_yaw, g_scan_stuck, g_scan_seg_name
@@ -669,19 +781,20 @@ def scan_start_full(reason):
     global g_scan_queue
     g_scan_queue = scan_queue_full_two_rounds()
     person_hit_reset()
-    gimbal_set_pitch_scan()
-    time.sleep(0.05)
+    # 扫前：必须上扬 + 尽量在中心起扫
     if abs(get_yaw()) > YAW_ARRIVE:
         gimbal_fast_home("scan_start_ensure_center", keep_scan_pitch=True)
-        gimbal_set_pitch_scan()
-        time.sleep(0.05)
+    else:
+        gimbal_pose_scan_yaw0()
     if len(g_scan_queue) <= 0:
         log("SCAN empty queue")
         return
     fx_scan()
+    # 再钉一次扫描俯仰，防止 home 后漂
+    gimbal_set_pitch_scan()
     scan_load_segment(0)
-    log("SCAN full 2-round start n=%d A=%+.0f B=%+.0f spd=%.0f | %s" % (
-        len(g_scan_queue), SCAN_SIDE_A, SCAN_SIDE_B, SCAN_YAW_SPEED, reason
+    log("SCAN full 2-round start n=%d A=%+.0f B=%+.0f spd=%.0f pitch=%d | %s" % (
+        len(g_scan_queue), SCAN_SIDE_A, SCAN_SIDE_B, SCAN_YAW_SPEED, PITCH_SCAN, reason
     ))
 
 def scan_tick_turn():
@@ -734,13 +847,14 @@ def set_state(s, reason):
         g_person_miss = 0
     log("STATE %s -> %s | %s" % (state_name(old), state_name(s), reason))
 
-    # ----- PATROL -----
+    # ----- PATROL：强制低头看线 -----
     if s == STATE_PATROL:
         fire_stop()
         chassis_halt()
         gimbal_stop()
         robot_ctrl.set_mode(rm_define.robot_mode_free)
-        gimbal_set_pitch_line()
+        # 关键：yaw 回中 + pitch 低头（解决扫完不低头）
+        gimbal_pose_line()
         fx_patrol()
         g_patrol_line_t0 = 0.0
         g_line_hit = 0
@@ -807,18 +921,18 @@ def set_state(s, reason):
             str(g_ir_done), T_BURST_ON, T_BURST_WAIT
         ))
 
-    # ----- RECOVER -----
+    # ----- RECOVER：低头找线 -----
     if s == STATE_RECOVER:
         fire_stop()
         chassis_halt()
         gimbal_stop()
         pid_reset_aim()
-        gimbal_set_pitch_line()
+        gimbal_pose_line()
         fx_recover()
         g_line_hit = 0
         g_line_miss = 0
         person_hit_reset()
-        log("RECOVER find line")
+        log("RECOVER find line pitch=%.0f" % get_pitch())
 
 def tick_patrol():
     """
@@ -826,8 +940,15 @@ def tick_patrol():
       连续 3 帧见人 → LOCK
       稳定无蓝线 → SCAN
       稳定有蓝线循线 T_MOVE → SCAN
+      若 pitch 明显未低头则再钉一次 PITCH_LINE
     """
     global g_patrol_line_t0
+    # 巡线中 pitch 若漂高（扫完未低头的残留），强制低头
+    try:
+        if get_pitch() > (PITCH_LINE + 8):
+            gimbal_set_pitch_line()
+    except Exception:
+        pass
     line_update()
     if person_hit_update():
         log("PATROL person hit=%d -> LOCK" % g_person_hit)
@@ -844,7 +965,9 @@ def tick_patrol():
         return
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
-        log("PATROL line stable follow %.1fs" % T_MOVE)
+        # 开始循线前再确保低头
+        gimbal_set_pitch_line()
+        log("PATROL line stable follow %.1fs pitch=%.0f" % (T_MOVE, get_pitch()))
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
         g_patrol_line_t0 = 0.0
@@ -922,7 +1045,8 @@ def tick_fire():
     FIRE:
       有人/coast：PID 跟瞄
       确认丢人 → 停枪 → LOST_SCAN
-      节奏：连发 T_BURST_ON(2s) → 等待 T_BURST_WAIT(3s) → 再连发 …
+      节奏：脉冲连击 T_BURST_ON(2s) → 等待 T_BURST_WAIT(3s) → 再 2s …
+      2s 内每 FIRE_PULSE_INTERVAL 发一次 fire_once（非依赖 fire_continuous 1Hz）
       水弹段不播配音
     """
     global g_fire_phase, g_phase_t0
@@ -951,16 +1075,18 @@ def tick_fire():
         return
 
     if g_fire_phase == FIRE_PHASE_BURST_ON:
-        if phase_age() >= T_BURST_ON:
-            fire_bead_burst_stop()
-            fx_fire_wait_led()
-            g_fire_phase = FIRE_PHASE_BURST_WAIT
-            g_phase_t0 = now_s()
-            log("FIRE wait %.1fs (person still tracked)" % T_BURST_WAIT)
+        # 窗口内持续脉冲射击
+        if phase_age() < T_BURST_ON:
+            fire_bead_burst_tick()
+            return
+        fire_bead_burst_stop()
+        fx_fire_wait_led()
+        g_fire_phase = FIRE_PHASE_BURST_WAIT
+        g_phase_t0 = now_s()
+        log("FIRE wait %.1fs (person still tracked)" % T_BURST_WAIT)
         return
 
     if g_fire_phase == FIRE_PHASE_BURST_WAIT:
-        # 等待期间人走了 → 上面 confirmed_lost 已处理
         if phase_age() >= T_BURST_WAIT:
             g_fire_phase = FIRE_PHASE_BURST_ON
             g_phase_t0 = now_s()
@@ -971,7 +1097,12 @@ def tick_recover():
     fire_stop()
     chassis_halt()
     gimbal_stop()
-    gimbal_set_pitch_line()
+    # 找线必须低头
+    try:
+        if get_pitch() > (PITCH_LINE + 8):
+            gimbal_set_pitch_line()
+    except Exception:
+        gimbal_set_pitch_line()
     line_update()
     if line_stable_true():
         log("RECOVER line -> PATROL")
@@ -990,14 +1121,13 @@ def setup():
     robot_ctrl.set_mode(rm_define.robot_mode_free)
     chassis_halt()
     set_gimbal_speed(HOME_YAW_SPEED)
-    gimbal_ctrl.yaw_ctrl(0)
-    gimbal_ctrl.pitch_ctrl(PITCH_LINE)
-    time.sleep(0.25)
+    gimbal_pose_line()
+    time.sleep(0.15)
     vision_ctrl.enable_detection(rm_define.vision_detection_people)
     vision_ctrl.enable_detection(rm_define.vision_detection_line)
     vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
     media_ctrl.exposure_value_update(rm_define.exposure_value_medium)
-    gun_ctrl.set_fire_count(1)
+    gun_ctrl.set_fire_count(FIRE_BEADS_PER_PULSE)
     try:
         ir_blaster_ctrl.set_fire_count(1)
     except Exception:
@@ -1005,14 +1135,14 @@ def setup():
     fx_patrol()
     pid_reset_aim()
     person_hit_reset()
-    log("setup done v1.9.0 scan=%.0f hit=%d burst=%.1f wait=%.1f" % (
-        SCAN_YAW_SPEED, PERSON_HIT_NEED, T_BURST_ON, T_BURST_WAIT
+    log("setup done v1.10.0 scan=%.0f pitchScan=%d pitchLine=%d pulse=%.2fs beads=%d" % (
+        SCAN_YAW_SPEED, PITCH_SCAN, PITCH_LINE, FIRE_PULSE_INTERVAL, FIRE_BEADS_PER_PULSE
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.9.0 stamp=2026-08-03 17:05:30")
+    print("# LINE_GUARD_VERSION=1.10.0 stamp=2026-08-03 17:16:25")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
