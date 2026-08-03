@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.8.0 stamp=2026-08-03 16:50:16  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.9.0 stamp=2026-08-03 17:05:30  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.8 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.9 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 总览：状态机
@@ -9,47 +9,41 @@
 #   INIT ──boot──► PATROL
 #                    │
 #        ┌───────────┼───────────────┐
-#        │ 有人      │ 丢线/到时      │
+#        │ 有人(3帧) │ 丢线/到时      │
 #        ▼          ▼               │
 #      LOCK ◄──── SCAN              │
 #        │          │ 扫完有线        │
-#        │ 瞄准+示警 │────────► PATROL│
+#        │ 跟瞄+IR  │────────► PATROL│
 #        ▼          │ 扫完无线        │
-#      FIRE         └───────► SCAN（再扫一轮完整两遍）
-#        │
-#        │ 确认丢人（LOCK/FIRE 都一样）
+#      FIRE         └───────► SCAN（完整两遍）
+#        │  连发2s → 等待3s → 连发2s …（人仍在）
+#        │ 确认丢人
 #        ▼
-#    LOST_SCAN ── 快回中 → 完整两遍 SCAN（与正常 SCAN 相同轨迹）
-#        │ 扫完
+#    LOST_SCAN ── 快回中 → 完整两遍 SCAN
+#        │
 #        ▼
 #    RECOVER ──有线──► PATROL
 #        └─仍无线──► SCAN
 #
-# 关于「打断后不续扫」：
-#   - SCAN / LOST_SCAN 中途见人 → LOCK（保持当前朝向去跟瞄，不先回中，否则丢目标）
-#   - LOCK / FIRE 确认丢人 → LOST_SCAN：先快回中，再从第一遍完整重做（不记断点、不半途续扫）
-#   - 正常扫完两遍 → 再回中（最后一站已是 0，再确认一次）→ 查线
+# 打断：
+#   - SCAN 中途「连续 3 帧」见人 → LOCK（先停转跟瞄，不回中）
+#   - LOCK/FIRE 确认丢人 → LOST_SCAN：快回中 + 完整两遍（不续半段）
 #
 # =============================================================================
-# SCAN 轨迹（云台 yaw 硬件约 ±250°，单边扫 180° 安全有余量）
+# SCAN 轨迹（yaw 硬件约 ±250°，单边 180°）
 # =============================================================================
+#   队列 [ +180, 0, -180, 0 ]，扫描角速度 150°/s
+#   若顺/逆与实车相反：对调 SCAN_SIDE_A / SCAN_SIDE_B
 #
-#   从中心 yaw=0 开始，绝对角度队列（度）：
+# 检测抗抖：
+#   - 进 LOCK：连续 PERSON_HIT_NEED=3 帧
+#   - 跟丢：连续 miss + T_CLEAR；丢检帧不立刻停云台，用上一帧位置 coast 跟瞄
 #
-#   第一遍（一侧再回中）:
-#     0 ──► +SCAN_HALF(+180)   # 用户：顺时针约 180°（一侧）
-#       ──► 0                  # 用户：逆时针约 180° 回中
-#   第二遍（另一侧再回中）:
-#     0 ──► -SCAN_HALF(-180)   # 用户：逆时针约 180°（另一侧）
-#       ──► 0                  # 用户：顺时针约 180° 回中
-#
-#   代码队列: [ +180, 0, -180, 0 ]
-#
-#   注意：S1 的「正 yaw / 负 yaw」与「顺/逆时针」以实车为准。
-#   若方向反了，只改 CONFIG 里 SCAN_SIDE_A / SCAN_SIDE_B 的符号即可，逻辑不用动。
-#
-# 状态灯 + 内置音效：见 fx_* 注释表
-# 射击：红外 ir_blaster 示警一次；水弹 gun 连发 1s / 停 1s
+# 射击：
+#   - LOCK 发现音响一次（recognize_success）
+#   - 进 FIRE 前红外 ir_blaster 示警 1 次（仅灯效，不配射击音）
+#   - 水弹 fire_continuous 连发 2s → stop → 人仍在则等 3s → 再连发 2s
+#   - 水弹段不播放 media_sound_shoot（机身自带射击声）
 #
 # =============================================================================
 
@@ -57,20 +51,20 @@
 # CONFIG
 # =============================================================================
 T_MOVE = 3.0
-T_CLEAR = 1.0
-PERSON_MISS_NEED = 10
+T_CLEAR = 1.5
+PERSON_MISS_NEED = 18
+PERSON_HIT_NEED = 3
 LOOP_DT = 0.05
 LOG_HEARTBEAT_S = 1.0
 
 PITCH_LINE = -20
 PITCH_SCAN = 10
 
-# --- SCAN：单边半幅 180°（硬件约 ±250，180 安全）---
+# --- SCAN ---
 SCAN_HALF = 180.0
-# 第一遍去的一侧 / 第二遍去的一侧（符号可按实车顺逆对调）
-SCAN_SIDE_A = SCAN_HALF    # +180，第一遍
-SCAN_SIDE_B = -SCAN_HALF   # -180，第二遍
-SCAN_YAW_SPEED = 200.0
+SCAN_SIDE_A = SCAN_HALF
+SCAN_SIDE_B = -SCAN_HALF
+SCAN_YAW_SPEED = 150.0
 YAW_ARRIVE = 8.0
 SCAN_STUCK_FRAMES = 12
 HOME_YAW_SPEED = 500.0
@@ -94,34 +88,38 @@ AIM_OK_ERR = 0.10
 PERSON_MIN_W = 0.06
 PERSON_MIN_H = 0.08
 
+# LOCK 跟瞄多久后红外示警 → FIRE
 T_AIM_BEFORE_IR = 1.2
-T_BURST_ON = 1.0
-T_BURST_OFF = 1.0
+# 水弹：连发 2s，间隔 3s（人未离开才进入下一轮）
+T_BURST_ON = 2.0
+T_BURST_WAIT = 3.0
 
 ENABLE_FIRE = True
 FORCE_NO_LINE = False
 FLASH_HZ = 3
 
 # =============================================================================
-# STATE 编号
+# STATE
 # =============================================================================
 STATE_INIT = 0
-STATE_PATROL = 1       # 低头循蓝线
-STATE_SCAN = 2         # 正常哨位扫描（完整两遍）
-STATE_LOCK = 3         # 发现人，PID 跟瞄
-STATE_FIRE = 4         # 示警 + 射击循环
-STATE_LOST_SCAN = 5    # 丢人后：快回中 + 完整两遍扫描（与 SCAN 同轨迹）
-STATE_RECOVER = 6      # 扫完找线
+STATE_PATROL = 1
+STATE_SCAN = 2
+STATE_LOCK = 3
+STATE_FIRE = 4
+STATE_LOST_SCAN = 5
+STATE_RECOVER = 6
 
-FIRE_PHASE_AIM = 0
-FIRE_PHASE_IR_DONE = 1
-FIRE_PHASE_BURST_ON = 2
-FIRE_PHASE_BURST_OFF = 3
+# FIRE 子阶段
+FIRE_PHASE_AIM = 0       # 未完成 IR（兜底）
+FIRE_PHASE_IR_DONE = 1   # IR 已完成，即将/正在连发
+FIRE_PHASE_BURST_ON = 2  # 水弹连发中
+FIRE_PHASE_BURST_WAIT = 3  # 连发间隔等待
 
 g_state = STATE_INIT
 g_state_t0 = 0.0
 g_no_person_t0 = 0.0
 g_person_miss = 0
+g_person_hit = 0
 g_patrol_line_t0 = 0.0
 g_last_hb_t = 0.0
 g_fire_count = 0
@@ -135,7 +133,12 @@ g_ep_prev = 0.0
 g_line_hit = 0
 g_line_miss = 0
 
-# SCAN 运行时：绝对 yaw 目标队列
+# 上一帧有效人体框（丢检时 coast 跟瞄用）
+g_last_px = 0.5
+g_last_py = 0.5
+g_have_last_person = False
+
+# SCAN
 g_scan_queue = []
 g_scan_qi = 0
 g_scan_target_yaw = 0.0
@@ -213,15 +216,16 @@ def pid_step(err, i_acc, e_prev, kp, ki, kd, out_max, dt):
 # =============================================================================
 # 灯光 + 内置音效
 #
-#  | 状态      | 灯色/效果            | 内置音效              |
-#  | PATROL    | 绿 常亮              | solmization_2C        |
-#  | SCAN      | 纯蓝 快闪 + 顶跑马   | scanning              |
-#  | RECENTER  | 黄 呼吸              | gimbal_rotate         |
-#  | LOCK      | 紫 快闪              | recognize_success     |
-#  | FIRE 示警 | 橙 快闪              | count_down            |
-#  | FIRE 射击 | 红 极快闪 + 枪口灯   | shoot                 |
-#  | LOST      | 橙 呼吸              | attacked              |
-#  | RECOVER   | 白 慢闪              | solmization_1G        |
+#  | 状态       | 灯                    | 音效                          |
+#  | PATROL     | 绿常亮                | solmization_2C                |
+#  | SCAN       | 蓝快闪+顶跑马         | scanning                      |
+#  | RECENTER   | 黄呼吸                | gimbal_rotate                 |
+#  | LOCK       | 紫快闪                | recognize_success（进态1次）  |
+#  | FIRE IR    | 橙快闪                | 无（不配 countdown）          |
+#  | FIRE 连发  | 红快闪+枪口灯         | 无（水弹自带声）              |
+#  | FIRE 等待  | 橙常亮                | 无                            |
+#  | LOST       | 橙呼吸                | attacked                      |
+#  | RECOVER    | 白慢闪                | solmization_1G                |
 # =============================================================================
 def sfx(sound_enum):
     try:
@@ -269,7 +273,6 @@ def fx_scan():
     sfx(rm_define.media_sound_scanning)
 
 def fx_scan_seg(seg_name):
-    """每一扫段开始时再响一次扫描音，便于听出进度。"""
     leds_set(0, 80, 255, rm_define.effect_flash, 5, top_marquee=True)
     sfx(rm_define.media_sound_scanning)
     log("SCAN seg start: %s" % seg_name)
@@ -279,16 +282,21 @@ def fx_recenter():
     sfx(rm_define.media_sound_gimbal_rotate)
 
 def fx_lock():
+    """发现人：紫闪 + 识别成功音（仅进 LOCK 时调用一次）。"""
     leds_set(200, 0, 255, rm_define.effect_flash, 6)
     sfx(rm_define.media_sound_recognize_success)
 
-def fx_fire_warn():
+def fx_fire_ir_led():
+    """红外示警：仅橙闪，不播音效。"""
     leds_set(255, 100, 0, rm_define.effect_flash, 7)
-    sfx(rm_define.media_sound_count_down)
 
-def fx_fire_burst():
-    leds_set(255, 0, 0, rm_define.effect_flash, 9, gun_on=True)
-    sfx(rm_define.media_sound_shoot)
+def fx_fire_burst_led():
+    """水弹连发：红闪+枪口灯，不播 shoot 音（机身自带）。"""
+    leds_set(255, 0, 0, rm_define.effect_flash, 8, gun_on=True)
+
+def fx_fire_wait_led():
+    """连发间隔等待：橙常亮，静音。"""
+    leds_set(255, 140, 0, rm_define.effect_always_on, FLASH_HZ)
 
 def fx_person_lost():
     leds_set(255, 140, 0, rm_define.effect_breath, FLASH_HZ)
@@ -344,15 +352,40 @@ def people_seen():
     ok, x, y, w, h = people_get_first()
     return ok
 
+def person_hit_reset():
+    global g_person_hit
+    g_person_hit = 0
+
+def person_hit_update():
+    """
+    进 LOCK 前的防抖：连续 PERSON_HIT_NEED 帧检出才算确认。
+    返回 True = 已确认见人，应进入 LOCK。
+    """
+    global g_person_hit
+    if people_seen():
+        g_person_hit = g_person_hit + 1
+    else:
+        g_person_hit = 0
+    return g_person_hit >= PERSON_HIT_NEED
+
 def person_track_update():
+    """
+    LOCK/FIRE 跟瞄用。
+    - 检出：更新 last_xy，清 miss
+    - 丢检：miss++，**不立刻停云台**（避免闪一下就停导致跟丢）
+    返回 True=本帧有检出。
+    """
     global g_person_miss, g_no_person_t0
+    global g_last_px, g_last_py, g_have_last_person
     ok, x, y, w, h = people_get_first()
     if ok:
         g_person_miss = 0
         g_no_person_t0 = now_s()
+        g_last_px = x
+        g_last_py = y
+        g_have_last_person = True
         return True
     g_person_miss = g_person_miss + 1
-    gimbal_stop()
     return False
 
 def person_confirmed_lost():
@@ -361,6 +394,36 @@ def person_confirmed_lost():
     if (now_s() - g_no_person_t0) < T_CLEAR:
         return False
     return True
+
+def aim_pid_towards_xy(x, y, dt):
+    """向归一化图像坐标 (x,y) 做 PID 云台。"""
+    global g_iy, g_ey_prev, g_ip, g_ep_prev
+    err_yaw = x - 0.5
+    err_pitch = y - 0.5
+    yaw_spd, g_iy, g_ey_prev = pid_step(
+        err_yaw, g_iy, g_ey_prev, AIM_YAW_KP, AIM_YAW_KI, AIM_YAW_KD, AIM_YAW_OUT_MAX, dt
+    )
+    pitch_spd, g_ip, g_ep_prev = pid_step(
+        err_pitch, g_ip, g_ep_prev, AIM_PITCH_KP, AIM_PITCH_KI, AIM_PITCH_KD, AIM_PITCH_OUT_MAX, dt
+    )
+    if abs(err_yaw) < AIM_OK_ERR and abs(err_pitch) < AIM_OK_ERR:
+        gimbal_stop()
+        return True
+    gimbal_ctrl.rotate_with_speed(yaw_spd, -pitch_spd)
+    return False
+
+def aim_pid_track(dt):
+    """
+    有检出用当前框；无检出但有 last 则 coast 跟 last（扛闪烁）。
+    确认丢失前不强制停台。
+    """
+    ok, x, y, w, h = people_get_first()
+    if ok:
+        return aim_pid_towards_xy(x, y, dt), True
+    if g_have_last_person:
+        return aim_pid_towards_xy(g_last_px, g_last_py, dt), False
+    gimbal_stop()
+    return False, False
 
 def line_info_raw():
     return vision_ctrl.get_line_detection_info()
@@ -425,11 +488,13 @@ def log_heartbeat():
         age = 0.0
         if g_patrol_line_t0 > 0:
             age = t - g_patrol_line_t0
-        extra = " lineHit=%d miss=%d follow=%.1f" % (g_line_hit, g_line_miss, age)
+        extra = " lineHit=%d miss=%d pHit=%d follow=%.1f" % (
+            g_line_hit, g_line_miss, g_person_hit, age
+        )
     elif g_state == STATE_SCAN or g_state == STATE_LOST_SCAN:
-        extra = " qi=%d/%d seg=%s tgt=%.0f yaw=%.0f stuck=%d person=%s" % (
+        extra = " qi=%d/%d seg=%s tgt=%.0f yaw=%.0f pHit=%d person=%s" % (
             g_scan_qi, len(g_scan_queue), g_scan_seg_name, g_scan_target_yaw,
-            get_yaw(), g_scan_stuck, str(has_p)
+            get_yaw(), g_person_hit, str(has_p)
         )
     elif g_state == STATE_LOCK or g_state == STATE_FIRE:
         extra = " person=%s miss=%d xy=(%.2f,%.2f) fphase=%d ir=%s" % (
@@ -461,27 +526,6 @@ def set_gimbal_speed(spd):
     except Exception:
         pass
 
-def aim_pid_towards_person(dt):
-    global g_iy, g_ey_prev, g_ip, g_ep_prev
-    ok, x, y, w, h = people_get_first()
-    if ok == False:
-        gimbal_stop()
-        pid_reset_aim()
-        return False, False
-    err_yaw = x - 0.5
-    err_pitch = y - 0.5
-    yaw_spd, g_iy, g_ey_prev = pid_step(
-        err_yaw, g_iy, g_ey_prev, AIM_YAW_KP, AIM_YAW_KI, AIM_YAW_KD, AIM_YAW_OUT_MAX, dt
-    )
-    pitch_spd, g_ip, g_ep_prev = pid_step(
-        err_pitch, g_ip, g_ep_prev, AIM_PITCH_KP, AIM_PITCH_KI, AIM_PITCH_KD, AIM_PITCH_OUT_MAX, dt
-    )
-    if abs(err_yaw) < AIM_OK_ERR and abs(err_pitch) < AIM_OK_ERR:
-        gimbal_stop()
-        return True, True
-    gimbal_ctrl.rotate_with_speed(yaw_spd, -pitch_spd)
-    return False, True
-
 def line_follow_step():
     info = line_info_raw()
     vx = LINE_SPEED
@@ -511,11 +555,12 @@ def fire_stop():
         pass
 
 def fire_ir_warn_once():
+    """红外示警一次：橙灯，无射击配音。"""
     global g_fire_count, g_ir_done
     if g_ir_done:
         log("IR_WARN skip already")
         return
-    fx_fire_warn()
+    fx_fire_ir_led()
     if ENABLE_FIRE == False:
         log("IR_WARN skip ENABLE_FIRE=0")
         g_ir_done = True
@@ -529,6 +574,7 @@ def fire_ir_warn_once():
     except Exception:
         ok_ir = False
     if ok_ir == False:
+        # 无 ir_blaster 时退回水弹单发一次作示警（仍不播配音）
         gun_ctrl.set_fire_count(1)
         gun_ctrl.fire_once()
         log("IR_WARN fallback gun fire_once")
@@ -536,13 +582,14 @@ def fire_ir_warn_once():
     g_ir_done = True
 
 def fire_bead_burst_start():
+    """水弹连发开始：仅灯效，不播 media_sound_shoot。"""
     if ENABLE_FIRE == False:
-        log("BURST_ON skip")
+        log("BURST_ON skip ENABLE_FIRE=0")
         return
-    fx_fire_burst()
+    fx_fire_burst_led()
     gun_ctrl.set_fire_count(1)
     gun_ctrl.fire_continuous()
-    log("BURST_ON 1s")
+    log("BURST_ON %.1fs" % T_BURST_ON)
 
 def fire_bead_burst_stop():
     gun_ctrl.stop()
@@ -550,29 +597,15 @@ def fire_bead_burst_stop():
         led_ctrl.gun_led_off()
     except Exception:
         pass
-    log("BURST_OFF 1s")
+    log("BURST_STOP -> wait %.1fs" % T_BURST_WAIT)
 
 # =============================================================================
-# SCAN 核心
-#
-# 完整两遍队列（绝对 yaw）：
-#   [ SIDE_A(+180), 0, SIDE_B(-180), 0 ]
-#   qi=0  第一遍去一侧
-#   qi=1  第一遍回中
-#   qi=2  第二遍去另一侧
-#   qi=3  第二遍回中
-#
-# 打断策略（无断点续扫）：
-#   见人 → LOCK（不回中，保持瞄准）
-#   丢人进入 LOST_SCAN → 先 fast_home，再整表重跑
+# SCAN 核心：完整两遍 [ +180, 0, -180, 0 ]
 # =============================================================================
-
 def scan_queue_full_two_rounds():
-    """返回完整两遍扫描的绝对 yaw 目标列表。"""
     return [SCAN_SIDE_A, 0.0, SCAN_SIDE_B, 0.0]
 
 def scan_seg_label(qi, target):
-    """给人看的段名，写进日志。"""
     if qi == 0:
         return "R1_to_%+.0f" % target
     if qi == 1:
@@ -584,11 +617,6 @@ def scan_seg_label(qi, target):
     return "qi%d_to_%+.0f" % (qi, target)
 
 def gimbal_fast_home(reason, keep_scan_pitch=False):
-    """
-    高速回 yaw=0。
-    keep_scan_pitch=True：扫前归零，俯仰保持扫人角
-    keep_scan_pitch=False：扫完/丢人归零，俯仰改回巡线角
-    """
     gimbal_stop()
     fx_recenter()
     yaw0 = get_yaw()
@@ -630,7 +658,6 @@ def scan_load_segment(qi):
     g_scan_last_yaw = get_yaw()
     g_scan_stuck = 0
     g_scan_seg_name = scan_seg_label(qi, g_scan_target_yaw)
-    # 去两侧时用扫描灯效+音；回中段用黄灯（仍由 tick 驱动转到 0）
     if abs(g_scan_target_yaw) < 0.1:
         fx_recenter()
         log("SCAN seg qi=%d %s (回中段)" % (qi, g_scan_seg_name))
@@ -639,17 +666,11 @@ def scan_load_segment(qi):
         log("SCAN seg qi=%d %s yaw0=%.0f" % (qi, g_scan_seg_name, g_scan_last_yaw))
 
 def scan_start_full(reason):
-    """
-    开始一次「完整两遍」扫描：
-      1) 抬头扫人俯仰
-      2) 若不在中心则先快回中（保证从 0 起算 180°）
-      3) 装入 [ +180, 0, -180, 0 ] 并启动第一段
-    """
     global g_scan_queue
     g_scan_queue = scan_queue_full_two_rounds()
+    person_hit_reset()
     gimbal_set_pitch_scan()
     time.sleep(0.05)
-    # 保证从 0 开始：否则「转 180」会偏
     if abs(get_yaw()) > YAW_ARRIVE:
         gimbal_fast_home("scan_start_ensure_center", keep_scan_pitch=True)
         gimbal_set_pitch_scan()
@@ -659,12 +680,11 @@ def scan_start_full(reason):
         return
     fx_scan()
     scan_load_segment(0)
-    log("SCAN full 2-round start n=%d A=%+.0f B=%+.0f | %s" % (
-        len(g_scan_queue), SCAN_SIDE_A, SCAN_SIDE_B, reason
+    log("SCAN full 2-round start n=%d A=%+.0f B=%+.0f spd=%.0f | %s" % (
+        len(g_scan_queue), SCAN_SIDE_A, SCAN_SIDE_B, SCAN_YAW_SPEED, reason
     ))
 
 def scan_tick_turn():
-    """朝当前绝对目标转；到位或卡住 → True（本段结束）。"""
     global g_scan_last_yaw, g_scan_stuck
     yaw = get_yaw()
     err = g_scan_target_yaw - yaw
@@ -690,7 +710,6 @@ def scan_tick_turn():
     return False
 
 def scan_advance_or_finish():
-    """本段完成：还有下一段 → next；整表完成 → done。"""
     global g_scan_qi
     gimbal_stop()
     ni = g_scan_qi + 1
@@ -703,12 +722,10 @@ def scan_advance_or_finish():
 # STATE MACHINE
 # =============================================================================
 def set_state(s, reason):
-    """
-    状态切换入口。每个分支写清：进态动作 / 灯效 / 与 SCAN 的关系。
-    """
     global g_state, g_state_t0, g_no_person_t0, g_person_miss
     global g_patrol_line_t0, g_fire_count, g_fire_phase, g_phase_t0
-    global g_ir_done, g_line_hit, g_line_miss
+    global g_ir_done, g_line_hit, g_line_miss, g_have_last_person
+    global g_last_px, g_last_py
     old = g_state
     g_state = s
     g_state_t0 = now_s()
@@ -717,8 +734,7 @@ def set_state(s, reason):
         g_person_miss = 0
     log("STATE %s -> %s | %s" % (state_name(old), state_name(s), reason))
 
-    # ----- PATROL：低头循线，绿灯 -----
-    # 来源：boot / SCAN 有线 / RECOVER 找到线
+    # ----- PATROL -----
     if s == STATE_PATROL:
         fire_stop()
         chassis_halt()
@@ -729,42 +745,38 @@ def set_state(s, reason):
         g_patrol_line_t0 = 0.0
         g_line_hit = 0
         g_line_miss = 0
+        person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
 
-    # ----- SCAN：正常完整两遍（从中心起 +180→0→-180→0）-----
-    # 来源：PATROL 丢线/到时 / RECOVER 仍无 / 上轮 SCAN 结束仍无线
-    # 打断：见人 → LOCK（不回中）
+    # ----- SCAN：完整两遍 -----
     if s == STATE_SCAN:
         fire_stop()
         chassis_halt()
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         scan_start_full("normal_scan")
 
-    # ----- LOST_SCAN：丢人后的完整两遍（与 SCAN 同轨迹）-----
-    # 来源：LOCK/FIRE 确认丢人
-    # 规则：先告警灯效 → 快回中 → 再完整第一遍+第二遍（不续半段）
+    # ----- LOST_SCAN：快回中 + 完整两遍 -----
     if s == STATE_LOST_SCAN:
         fire_stop()
         chassis_halt()
         gimbal_stop()
         pid_reset_aim()
+        g_have_last_person = False
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         fx_person_lost()
         time.sleep(0.2)
-        # 关键：快速回中，再重做两遍
         gimbal_fast_home("lost_before_rescan", keep_scan_pitch=True)
         scan_start_full("lost_rescan_full")
 
-    # ----- LOCK：发现人，紫灯，PID 跟瞄；不强制回中 -----
-    # 来源：PATROL/SCAN/LOST_SCAN 见人
-    # 离开：瞄准够久后红外示警 → FIRE；确认丢人 → LOST_SCAN
+    # ----- LOCK：发现音一次，停转跟瞄 -----
     if s == STATE_LOCK:
-        # 注意：从 SCAN 打断时不回中、不记断点，跟丢后 LOST_SCAN 会整表重扫
         fire_stop()
         chassis_halt()
+        gimbal_stop()
         robot_ctrl.set_mode(rm_define.robot_mode_free)
         gimbal_set_pitch_scan()
         pid_reset_aim()
+        person_hit_reset()
         fx_lock()
         g_fire_count = 0
         g_ir_done = False
@@ -773,25 +785,29 @@ def set_state(s, reason):
         g_person_miss = 0
         g_no_person_t0 = now_s()
         ok, x, y, w, h = people_get_first()
-        log("LOCK ok=%s xy=(%.2f,%.2f) (scan interrupted, no resume)" % (str(ok), x, y))
+        if ok:
+            g_last_px = x
+            g_last_py = y
+            g_have_last_person = True
+        log("LOCK ok=%s xy=(%.2f,%.2f) hitNeed=%d" % (str(ok), x, y, PERSON_HIT_NEED))
 
-    # ----- FIRE：示警已做或进入连发循环 -----
+    # ----- FIRE：IR 已做则直接进入连发节奏 -----
     if s == STATE_FIRE:
         chassis_halt()
         pid_reset_aim()
         if g_ir_done:
             g_fire_phase = FIRE_PHASE_IR_DONE
-            fx_fire_burst()
         else:
             g_fire_phase = FIRE_PHASE_AIM
             fx_lock()
         g_phase_t0 = now_s()
         g_person_miss = 0
         g_no_person_t0 = now_s()
-        log("FIRE enter ir_done=%s" % str(g_ir_done))
+        log("FIRE enter ir_done=%s burst=%.1fs wait=%.1fs" % (
+            str(g_ir_done), T_BURST_ON, T_BURST_WAIT
+        ))
 
-    # ----- RECOVER：扫完后低头找蓝线 -----
-    # 来源：LOST_SCAN 两遍做完
+    # ----- RECOVER -----
     if s == STATE_RECOVER:
         fire_stop()
         chassis_halt()
@@ -801,23 +817,25 @@ def set_state(s, reason):
         fx_recover()
         g_line_hit = 0
         g_line_miss = 0
+        person_hit_reset()
         log("RECOVER find line")
 
 def tick_patrol():
     """
     PATROL:
-      见人 → LOCK
-      稳定无蓝线 → SCAN（完整两遍）
-      稳定有蓝线 → 循线 T_MOVE 秒 → SCAN
+      连续 3 帧见人 → LOCK
+      稳定无蓝线 → SCAN
+      稳定有蓝线循线 T_MOVE → SCAN
     """
     global g_patrol_line_t0
     line_update()
-    if people_seen():
-        log("PATROL person -> LOCK")
+    if person_hit_update():
+        log("PATROL person hit=%d -> LOCK" % g_person_hit)
         set_state(STATE_LOCK, "person_on_patrol")
         return
     if line_stable_false():
         g_patrol_line_t0 = 0.0
+        person_hit_reset()
         chassis_halt()
         set_state(STATE_SCAN, "no_line_stable")
         return
@@ -830,30 +848,29 @@ def tick_patrol():
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
         g_patrol_line_t0 = 0.0
+        person_hit_reset()
         set_state(STATE_SCAN, "follow_time_up")
 
 def tick_scan_common(is_lost):
     """
-    SCAN / LOST_SCAN 共用：
-      见人 → LOCK（保持朝向，不回中）
-      当前段未到 → 继续转
-      段完成 → 下一段；整表完成：
-        LOST_SCAN → RECOVER
-        SCAN → 查线 → 有线 PATROL / 无线再 SCAN
+    SCAN / LOST_SCAN:
+      连续 3 帧见人 → 停转 → LOCK
+      段推进 / 整表完成同 v1.8
     """
     chassis_halt()
-    if people_seen():
+    if person_hit_update():
         gimbal_stop()
-        log("SCAN person -> LOCK (abort scan, no partial resume)")
+        log("SCAN person hit=%d -> LOCK" % g_person_hit)
         set_state(STATE_LOCK, "person_on_scan")
         return
     if scan_tick_turn() == False:
         return
+    # 段切换时清命中计数，避免跨段误累加
+    person_hit_reset()
     log("SCAN seg done %s yaw=%.0f" % (g_scan_seg_name, get_yaw()))
     adv = scan_advance_or_finish()
     if adv == "next":
         return
-    # 整表完成：最后一段已是 0，再确认回中 + 低头（准备巡线/找线）
     gimbal_fast_home("scan_two_rounds_done", keep_scan_pitch=False)
     if is_lost:
         log("LOST_SCAN done 2-round -> RECOVER")
@@ -868,7 +885,7 @@ def tick_scan_common(is_lost):
         log("SCAN done line -> PATROL")
         set_state(STATE_PATROL, "scan_has_line")
         return
-    log("SCAN done no line -> SCAN again (full 2-round)")
+    log("SCAN done no line -> SCAN again")
     set_state(STATE_SCAN, "rescan_no_line")
 
 def tick_scan():
@@ -880,41 +897,45 @@ def tick_lost_scan():
 def tick_lock():
     """
     LOCK:
-      有人 → PID 跟瞄；够 T_AIM_BEFORE_IR → 红外示警 → FIRE
-      确认丢人 → LOST_SCAN（进态时会快回中并完整两遍重扫）
+      跟瞄（丢检 coast）；够 T_AIM_BEFORE_IR → IR 示警 → FIRE
+      确认丢人 → LOST_SCAN
     """
     global g_fire_phase, g_phase_t0
     chassis_halt()
-    has = person_track_update()
-    if has:
-        aim_pid_towards_person(LOOP_DT)
-        if g_ir_done == False and state_age() >= T_AIM_BEFORE_IR:
+    person_track_update()
+    aim_pid_track(LOOP_DT)
+    if person_confirmed_lost():
+        log("LOCK lost miss=%d -> LOST_SCAN" % g_person_miss)
+        set_state(STATE_LOST_SCAN, "person_lost")
+        return
+    if g_ir_done == False and state_age() >= T_AIM_BEFORE_IR:
+        # 至少近期见过人再开火示警（have last 或 miss 不多）
+        if g_have_last_person and g_person_miss < PERSON_MISS_NEED:
             fire_ir_warn_once()
             g_fire_phase = FIRE_PHASE_IR_DONE
             g_phase_t0 = now_s()
             log("LOCK IR warn -> FIRE")
             set_state(STATE_FIRE, "after_ir_warn")
-        return
-    if person_confirmed_lost():
-        log("LOCK lost miss=%d -> LOST_SCAN (home+full rescan)" % g_person_miss)
-        set_state(STATE_LOST_SCAN, "person_lost")
 
 def tick_fire():
     """
     FIRE:
-      丢人确认 → LOST_SCAN
-      有人 → 继续跟瞄 + 水弹 1s 开 / 1s 停
+      有人/coast：PID 跟瞄
+      确认丢人 → 停枪 → LOST_SCAN
+      节奏：连发 T_BURST_ON(2s) → 等待 T_BURST_WAIT(3s) → 再连发 …
+      水弹段不播配音
     """
     global g_fire_phase, g_phase_t0
     chassis_halt()
-    has = person_track_update()
-    if has == False:
+    person_track_update()
+    if person_confirmed_lost():
         fire_stop()
-        if person_confirmed_lost():
-            log("FIRE lost miss=%d -> LOST_SCAN (home+full rescan)" % g_person_miss)
-            set_state(STATE_LOST_SCAN, "person_lost_fire")
+        log("FIRE lost miss=%d -> LOST_SCAN" % g_person_miss)
+        set_state(STATE_LOST_SCAN, "person_lost_fire")
         return
-    aim_pid_towards_person(LOOP_DT)
+    aim_pid_track(LOOP_DT)
+
+    # 兜底：若未 IR（异常路径）
     if g_ir_done == False:
         if state_age() >= T_AIM_BEFORE_IR:
             fire_ir_warn_once()
@@ -922,30 +943,31 @@ def tick_fire():
             g_phase_t0 = now_s()
             fire_bead_burst_start()
         return
+
     if g_fire_phase == FIRE_PHASE_IR_DONE:
         g_fire_phase = FIRE_PHASE_BURST_ON
         g_phase_t0 = now_s()
         fire_bead_burst_start()
         return
+
     if g_fire_phase == FIRE_PHASE_BURST_ON:
         if phase_age() >= T_BURST_ON:
             fire_bead_burst_stop()
-            g_fire_phase = FIRE_PHASE_BURST_OFF
+            fx_fire_wait_led()
+            g_fire_phase = FIRE_PHASE_BURST_WAIT
             g_phase_t0 = now_s()
+            log("FIRE wait %.1fs (person still tracked)" % T_BURST_WAIT)
         return
-    if g_fire_phase == FIRE_PHASE_BURST_OFF:
-        if phase_age() >= T_BURST_OFF:
+
+    if g_fire_phase == FIRE_PHASE_BURST_WAIT:
+        # 等待期间人走了 → 上面 confirmed_lost 已处理
+        if phase_age() >= T_BURST_WAIT:
             g_fire_phase = FIRE_PHASE_BURST_ON
             g_phase_t0 = now_s()
             fire_bead_burst_start()
         return
 
 def tick_recover():
-    """
-    RECOVER:
-      稳定有线 → PATROL
-      稳定无线 → SCAN（再完整两遍）
-    """
     fire_stop()
     chassis_halt()
     gimbal_stop()
@@ -982,14 +1004,15 @@ def setup():
         pass
     fx_patrol()
     pid_reset_aim()
-    log("setup done v1.8.0 half=%.0f A=%+.0f B=%+.0f home=%.0f" % (
-        SCAN_HALF, SCAN_SIDE_A, SCAN_SIDE_B, HOME_YAW_SPEED
+    person_hit_reset()
+    log("setup done v1.9.0 scan=%.0f hit=%d burst=%.1f wait=%.1f" % (
+        SCAN_YAW_SPEED, PERSON_HIT_NEED, T_BURST_ON, T_BURST_WAIT
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.8.0 stamp=2026-08-03 16:50:16")
+    print("# LINE_GUARD_VERSION=1.9.0 stamp=2026-08-03 17:05:30")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
