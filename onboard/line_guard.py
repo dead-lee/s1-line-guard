@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.14.0 stamp=2026-08-04 13:44:15  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.15.0 stamp=2026-08-04 14:07:18  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.14 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.15 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -22,17 +22,32 @@
 #   chassis.set_trans_speed(0.2); chassis.move(0)
 # 我们之前用裸 list 下标，在 S1 上与 RmList 语义不一致 → 一直 pts=0。
 # SCAN/LOCK/FIRE 仍 robot_mode_free。
+#
+# v1.15 防死循环：
+#   - SCAN 无蓝线不得无限 rescan；最多 1 次后 RECOVER/PATROL
+#   - 射击结束优先 RECOVER 找线，并对行人检测冷却，避免操作者一直被锁
+#   - FIRE 最长时长 / 最多连射轮数后强制退出
 # =============================================================================
 
 # =============================================================================
 # CONFIG
 # =============================================================================
 T_MOVE = 3.0
-T_CLEAR = 1.5
-PERSON_MISS_NEED = 18
+T_CLEAR = 1.2
+PERSON_MISS_NEED = 12
 PERSON_HIT_NEED = 3
+# SCAN 中认人更严（操作者常在画面里）
+PERSON_HIT_NEED_SCAN = 6
 LOOP_DT = 0.05
 LOG_HEARTBEAT_S = 1.0
+# 射击/丢目标后忽略行人秒数，便于回线
+T_PERSON_COOLDOWN = 12.0
+# 单次 FIRE 状态最长秒数（含等待）
+T_FIRE_MAX = 8.0
+# 一次 FIRE 最多几轮「2s 连射」
+FIRE_MAX_ROUNDS = 1
+# SCAN 连续「无蓝线再扫」次数上限
+SCAN_EMPTY_MAX = 1
 
 # 俯仰：巡线低头 / 扫描上扬（文档 pitch 范围约 -20~+35）
 PITCH_LINE = -20
@@ -132,6 +147,9 @@ g_line_pts = 0
 g_line_ever_ok = False
 g_line_pid = None
 g_line_look_done = False
+g_person_ignore_until = 0.0
+g_scan_empty_count = 0
+g_fire_rounds = 0
 
 # 上一帧有效人体框（丢检时 coast 跟瞄用）
 g_last_px = 0.5
@@ -353,7 +371,18 @@ def people_get_first():
         return False, x, y, w, h
     return True, x, y, w, h
 
+def person_cooldown_active():
+    return now_s() < g_person_ignore_until
+
+def person_cooldown_start(sec, reason):
+    global g_person_ignore_until
+    g_person_ignore_until = now_s() + sec
+    person_hit_reset()
+    log("PERSON cooldown %.1fs | %s" % (sec, reason))
+
 def people_seen():
+    if person_cooldown_active():
+        return False
     ok, x, y, w, h = people_get_first()
     return ok
 
@@ -361,27 +390,30 @@ def person_hit_reset():
     global g_person_hit
     g_person_hit = 0
 
-def person_hit_update():
+def person_hit_update(need):
     """
-    进 LOCK 前的防抖：连续 PERSON_HIT_NEED 帧检出才算确认。
-    返回 True = 已确认见人，应进入 LOCK。
+    进 LOCK 前防抖。need 为所需连续帧数。
+    冷却期内永不确认。
     """
     global g_person_hit
+    if person_cooldown_active():
+        g_person_hit = 0
+        return False
     if people_seen():
         g_person_hit = g_person_hit + 1
     else:
         g_person_hit = 0
-    return g_person_hit >= PERSON_HIT_NEED
+    return g_person_hit >= need
 
 def person_track_update():
     """
-    LOCK/FIRE 跟瞄用。
-    - 检出：更新 last_xy，清 miss
-    - 丢检：miss++，**不立刻停云台**（避免闪一下就停导致跟丢）
-    返回 True=本帧有检出。
+    LOCK/FIRE 跟瞄用。冷却期视为一直 miss（尽快退出战斗态）。
     """
     global g_person_miss, g_no_person_t0
     global g_last_px, g_last_py, g_have_last_person
+    if person_cooldown_active():
+        g_person_miss = g_person_miss + 1
+        return False
     ok, x, y, w, h = people_get_first()
     if ok:
         g_person_miss = 0
@@ -399,6 +431,12 @@ def person_confirmed_lost():
     if (now_s() - g_no_person_t0) < T_CLEAR:
         return False
     return True
+
+def leave_combat_to_recover(reason):
+    """射击/锁定结束后：停火、行人冷却、去找线（打断 SCAN/FIRE 死循环）。"""
+    fire_stop()
+    person_cooldown_start(T_PERSON_COOLDOWN, reason)
+    set_state(STATE_RECOVER, reason)
 
 def aim_pid_towards_xy(x, y, dt):
     """向归一化图像坐标 (x,y) 做 PID 云台。"""
@@ -1010,7 +1048,7 @@ def set_state(s, reason):
     global g_state, g_state_t0, g_no_person_t0, g_person_miss
     global g_patrol_line_t0, g_fire_count, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_have_last_person
-    global g_last_px, g_last_py, g_line_ever_ok
+    global g_last_px, g_last_py, g_line_ever_ok, g_fire_rounds
     old = g_state
     g_state = s
     g_state_t0 = now_s()
@@ -1087,10 +1125,11 @@ def set_state(s, reason):
             g_have_last_person = True
         log("LOCK ok=%s xy=(%.2f,%.2f) hitNeed=%d" % (str(ok), x, y, PERSON_HIT_NEED))
 
-    # ----- FIRE：再次确认 free，再脉冲射击 -----
+    # ----- FIRE -----
     if s == STATE_FIRE:
         mode_ensure_free("enter_FIRE")
         pid_reset_aim()
+        g_fire_rounds = 0
         if g_ir_done:
             g_fire_phase = FIRE_PHASE_IR_DONE
         else:
@@ -1099,11 +1138,11 @@ def set_state(s, reason):
         g_phase_t0 = now_s()
         g_person_miss = 0
         g_no_person_t0 = now_s()
-        log("FIRE enter ir_done=%s burst=%.1fs wait=%.1fs" % (
-            str(g_ir_done), T_BURST_ON, T_BURST_WAIT
+        log("FIRE enter ir_done=%s max_s=%.1f rounds<=%d" % (
+            str(g_ir_done), T_FIRE_MAX, FIRE_MAX_ROUNDS
         ))
 
-    # ----- RECOVER：free 低头找线；回 PATROL 时再开 gimbal_lead -----
+    # ----- RECOVER：找线（冷却期内不锁人）-----
     if s == STATE_RECOVER:
         pid_reset_aim()
         gimbal_pose_line()
@@ -1111,16 +1150,18 @@ def set_state(s, reason):
         g_line_hit = 0
         g_line_miss = 0
         person_hit_reset()
-        log("RECOVER find line pitch=%.0f mode=free" % get_pitch())
+        log("RECOVER find line pitch=%.0f cd=%s" % (
+            get_pitch(), str(person_cooldown_active())
+        ))
 
 def tick_patrol():
     """
-    PATROL = 官方循线循环 + 状态转移：
-      见人 → LOCK；曾见线后丢线 → SCAN；满 T_MOVE → SCAN
+    PATROL = 官方循线 + 转移。
+    冷却期内不因行人进 LOCK。
     """
-    global g_patrol_line_t0
+    global g_patrol_line_t0, g_scan_empty_count
     line_update()
-    if person_hit_update():
+    if person_hit_update(PERSON_HIT_NEED):
         log("PATROL person hit=%d -> LOCK" % g_person_hit)
         set_state(STATE_LOCK, "person_on_patrol")
         return
@@ -1135,7 +1176,6 @@ def tick_patrol():
             g_patrol_line_t0 = 0.0
             set_state(STATE_SCAN, "no_line_timeout")
             return
-        # 官方 else：云台角速度清零
         try:
             gimbal_ctrl.rotate_with_speed(0, 0)
         except Exception:
@@ -1149,13 +1189,14 @@ def tick_patrol():
             pass
         chassis_halt()
         return
+    # 成功贴线：清空「空扫」计数
+    g_scan_empty_count = 0
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
         mode_ensure_line_follow("patrol_follow_begin")
         log("PATROL follow start cx=%.2f pts=%d n=%d pitch=%.0f" % (
             g_line_cx, g_line_pts, g_line_info_len, get_pitch()
         ))
-    # 官方循环体
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
         g_patrol_line_t0 = 0.0
@@ -1164,19 +1205,18 @@ def tick_patrol():
 
 def tick_scan_common(is_lost):
     """
-    SCAN / LOST_SCAN:
-      连续 3 帧见人 → 停转 → LOCK
-      段推进 / 整表完成同 v1.8
+    SCAN / LOST_SCAN：
+      冷却期不锁人；认人更严；扫完无蓝线不得无限重扫。
     """
+    global g_scan_empty_count
     chassis_halt()
-    if person_hit_update():
+    if person_hit_update(PERSON_HIT_NEED_SCAN):
         gimbal_stop()
-        log("SCAN person hit=%d -> LOCK" % g_person_hit)
+        log("SCAN person hit=%d need=%d -> LOCK" % (g_person_hit, PERSON_HIT_NEED_SCAN))
         set_state(STATE_LOCK, "person_on_scan")
         return
     if scan_tick_turn() == False:
         return
-    # 段切换时清命中计数，避免跨段误累加
     person_hit_reset()
     log("SCAN seg done %s yaw=%.0f" % (g_scan_seg_name, get_yaw()))
     adv = scan_advance_or_finish()
@@ -1184,7 +1224,7 @@ def tick_scan_common(is_lost):
         return
     gimbal_fast_home("scan_two_rounds_done", keep_scan_pitch=False)
     if is_lost:
-        log("LOST_SCAN done 2-round -> RECOVER")
+        log("LOST_SCAN done -> RECOVER")
         set_state(STATE_RECOVER, "lost_scan_done")
         return
     i = 0
@@ -1193,10 +1233,19 @@ def tick_scan_common(is_lost):
         time.sleep(LOOP_DT)
         i = i + 1
     if line_stable_true():
+        g_scan_empty_count = 0
         log("SCAN done line -> PATROL")
         set_state(STATE_PATROL, "scan_has_line")
         return
-    log("SCAN done no line -> SCAN again")
+    # 无蓝线：限制重扫次数，避免 SCAN 死循环
+    g_scan_empty_count = g_scan_empty_count + 1
+    if g_scan_empty_count > SCAN_EMPTY_MAX:
+        log("SCAN empty x%d -> RECOVER (break loop)" % g_scan_empty_count)
+        g_scan_empty_count = 0
+        person_cooldown_start(T_PERSON_COOLDOWN, "scan_empty_break")
+        set_state(STATE_RECOVER, "scan_empty_break")
+        return
+    log("SCAN done no line -> SCAN again (%d/%d)" % (g_scan_empty_count, SCAN_EMPTY_MAX))
     set_state(STATE_SCAN, "rescan_no_line")
 
 def tick_scan():
@@ -1206,21 +1255,19 @@ def tick_lost_scan():
     tick_scan_common(True)
 
 def tick_lock():
-    """
-    LOCK:
-      跟瞄（丢检 coast）；够 T_AIM_BEFORE_IR → IR 示警 → FIRE
-      确认丢人 → LOST_SCAN
-    """
     global g_fire_phase, g_phase_t0
     chassis_halt()
     person_track_update()
     aim_pid_track(LOOP_DT)
     if person_confirmed_lost():
-        log("LOCK lost miss=%d -> LOST_SCAN" % g_person_miss)
-        set_state(STATE_LOST_SCAN, "person_lost")
+        log("LOCK lost -> RECOVER (no LOST_SCAN loop)")
+        leave_combat_to_recover("lock_lost")
+        return
+    # 冷却开始后也可能从 LOCK 进来：直接撤
+    if person_cooldown_active():
+        leave_combat_to_recover("lock_cooldown")
         return
     if g_ir_done == False and state_age() >= T_AIM_BEFORE_IR:
-        # 至少近期见过人再开火示警（have last 或 miss 不多）
         if g_have_last_person and g_person_miss < PERSON_MISS_NEED:
             fire_ir_warn_once()
             g_fire_phase = FIRE_PHASE_IR_DONE
@@ -1230,35 +1277,39 @@ def tick_lock():
 
 def tick_fire():
     """
-    FIRE:
-      有人/coast：PID 跟瞄
-      确认丢人 → 停枪 → LOST_SCAN
-      节奏：脉冲连击 T_BURST_ON(2s) → 等待 T_BURST_WAIT(3s) → 再 2s …
-      2s 内每 FIRE_PULSE_INTERVAL 发一次 fire_once（非依赖 fire_continuous 1Hz）
-      水弹段不播配音
+    FIRE：有限轮连射 + 总时长上限，结束后 RECOVER（打断死循环）。
+    fire_once 会阻塞，轮数/时长限制也减轻「停不掉」体感。
     """
-    global g_fire_phase, g_phase_t0
+    global g_fire_phase, g_phase_t0, g_fire_rounds
     chassis_halt()
     person_track_update()
-    if person_confirmed_lost():
-        fire_stop()
-        log("FIRE lost miss=%d -> LOST_SCAN" % g_person_miss)
-        set_state(STATE_LOST_SCAN, "person_lost_fire")
+
+    # 总时长到：强制退出战斗
+    if state_age() >= T_FIRE_MAX:
+        log("FIRE max time %.1fs -> RECOVER" % T_FIRE_MAX)
+        leave_combat_to_recover("fire_max_time")
         return
+
+    if person_confirmed_lost():
+        log("FIRE lost -> RECOVER")
+        leave_combat_to_recover("fire_lost")
+        return
+
     aim_pid_track(LOOP_DT)
 
-    # 兜底：若未 IR（异常路径）
     if g_ir_done == False:
         if state_age() >= T_AIM_BEFORE_IR:
             fire_ir_warn_once()
             g_fire_phase = FIRE_PHASE_BURST_ON
             g_phase_t0 = now_s()
+            g_fire_rounds = 1
             fire_bead_burst_start()
         return
 
     if g_fire_phase == FIRE_PHASE_IR_DONE:
         g_fire_phase = FIRE_PHASE_BURST_ON
         g_phase_t0 = now_s()
+        g_fire_rounds = 1
         fire_bead_burst_start()
         return
 
@@ -1267,6 +1318,11 @@ def tick_fire():
             fire_bead_burst_tick()
             return
         fire_bead_burst_stop()
+        # 默认只打一轮就撤，避免操作者站在旁边无限 2s/3s
+        if g_fire_rounds >= FIRE_MAX_ROUNDS:
+            log("FIRE rounds=%d done -> RECOVER" % g_fire_rounds)
+            leave_combat_to_recover("fire_rounds_done")
+            return
         fx_fire_wait_led()
         g_fire_phase = FIRE_PHASE_BURST_WAIT
         g_phase_t0 = now_s()
@@ -1275,12 +1331,13 @@ def tick_fire():
 
     if g_fire_phase == FIRE_PHASE_BURST_WAIT:
         if phase_age() >= T_BURST_WAIT:
-            # 等待结束时必须仍能看到人，否则不进入下一轮连射
             if people_seen() == False:
-                log("FIRE wait end no person -> stop burst")
-                if person_confirmed_lost():
-                    fire_stop()
-                    set_state(STATE_LOST_SCAN, "person_lost_after_wait")
+                log("FIRE wait end no person -> RECOVER")
+                leave_combat_to_recover("fire_wait_empty")
+                return
+            g_fire_rounds = g_fire_rounds + 1
+            if g_fire_rounds > FIRE_MAX_ROUNDS:
+                leave_combat_to_recover("fire_rounds_cap")
                 return
             g_fire_phase = FIRE_PHASE_BURST_ON
             g_phase_t0 = now_s()
@@ -1291,18 +1348,29 @@ def tick_recover():
     fire_stop()
     chassis_halt()
     gimbal_stop()
-    # 找线必须低头
     try:
         if get_pitch() > (PITCH_LINE + 8):
             gimbal_set_pitch_line()
     except Exception:
         gimbal_set_pitch_line()
     line_update()
+    # 冷却期内不因人打断找线
+    if person_cooldown_active() == False:
+        if person_hit_update(PERSON_HIT_NEED_SCAN):
+            set_state(STATE_LOCK, "person_on_recover")
+            return
     if line_stable_true():
         log("RECOVER line -> PATROL")
         set_state(STATE_PATROL, "line_found")
         return
-    if line_stable_false() and state_age() >= 0.6:
+    # 找不到线：不要马上又 SCAN（会死循环）；多等一会再扫
+    if line_stable_false() and state_age() >= 2.0:
+        if g_scan_empty_count >= SCAN_EMPTY_MAX:
+            # 继续低头找，不扫
+            if state_age() >= 6.0:
+                log("RECOVER still no line -> PATROL try follow")
+                set_state(STATE_PATROL, "recover_give_patrol")
+            return
         log("RECOVER no line -> SCAN")
         set_state(STATE_SCAN, "still_no_line")
         return
@@ -1319,7 +1387,7 @@ def setup():
     vision_ctrl.enable_detection(rm_define.vision_detection_people)
     vision_ctrl.enable_detection(rm_define.vision_detection_line)
     vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-    media_ctrl.exposure_value_update(rm_define.exposure_value_medium)
+    media_ctrl.exposure_value_update(rm_define.exposure_value_small)
     gun_ctrl.set_fire_count(FIRE_BEADS_PER_PULSE)
     try:
         ir_blaster_ctrl.set_fire_count(1)
@@ -1329,14 +1397,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.14.0 line=RmList+official spd=%.2f pid=%.0f" % (
-        LINE_SPEED, LINE_PID_KP
+    log("setup done v1.15.0 anti-loop cooldown=%.0fs fire_max=%.0fs" % (
+        T_PERSON_COOLDOWN, T_FIRE_MAX
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.14.0 stamp=2026-08-04 13:44:15")
+    print("# LINE_GUARD_VERSION=1.15.0 stamp=2026-08-04 14:07:18")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
