@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.12.0 stamp=2026-08-04 13:00:37  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.13.0 stamp=2026-08-04 13:06:31  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.12 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.13 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -10,43 +10,13 @@
 # - 巡线相关：LINE_*、LINE VISION、LINE FOLLOW、tick_patrol、模式切换
 #
 # =============================================================================
-# 云台模式纪律（必须手工切换，否则 SCAN/射击会被跟随干扰）
+# 模式纪律（v1.13 修复：1.12 线解析过严导致有线不巡、误进 SCAN 乱射）
 # =============================================================================
-#   PATROL 循线   → robot_mode_gimbal_follow（云台优先：转云台改行驶方向）
-#   SCAN / LOST_SCAN / LOCK / FIRE / RECOVER
-#                 → robot_mode_free（自由云台：独立 yaw/pitch，底盘不跟）
-# 规则：
-#   1) 进 SCAN / 射击相关态：必须 mode_ensure_free()（停底盘 + free）
-#   2) 重新巡线进 PATROL：先 free 摆低头姿态，再 mode_ensure_gimbal_lead()
-#   3) 禁止在 SCAN/LOCK/FIRE 里保持 gimbal_follow
-#
-# =============================================================================
-# 总览：状态机
-# =============================================================================
-#
-#   INIT ──boot──► PATROL (gimbal_follow)
-#                    │
-#        ┌───────────┼───────────────┐
-#        │ 有人(3帧) │ 丢线/到时      │
-#        ▼          ▼               │
-#      LOCK ◄──── SCAN              │  ← free
-#        │          │ 扫完有线        │
-#        │ 跟瞄+IR  │────────► PATROL│  ← 再开 gimbal_follow
-#        ▼          │ 扫完无线        │
-#      FIRE         └───────► SCAN
-#        │  free；脉冲射击
-#        ▼
-#    LOST_SCAN ── free 快回中 → 完整两遍 SCAN
-#        ▼
-#    RECOVER (free) ──有线──► PATROL (gimbal_follow)
-#
-# =============================================================================
-# PATROL 巡线（云台优先）
-# =============================================================================
-#   - 线 info[19] 为 cx；err=cx-0.5 → gimbal.rotate_with_speed
-#   - chassis 只前进；无线则停，禁止盲目前进
-#
-# SCAN: [+180,0,-180,0] @120°/s pitch+20 | FIRE: IR + 脉冲 2s/等 3s
+#   PATROL → robot_mode_chassis_follow（DJI 实验室 Line Follower 同款）
+#            + 云台对准线 + 底盘前进
+#   SCAN/LOCK/FIRE/LOST/RECOVER → robot_mode_free
+#   线：len>=42 且 info[2]>=1，cx=info[19]（允许 0~1）
+#   从未识别到线时不立刻 no_line→SCAN；FIRE 时当前无人则停脉冲
 # =============================================================================
 
 # =============================================================================
@@ -151,6 +121,8 @@ g_line_cx = 0.5
 g_line_err = 0.0
 g_line_yaw_spd = 0.0
 g_line_info_len = 0
+g_line_pts = 0
+g_line_ever_ok = False
 
 # 上一帧有效人体框（丢检时 coast 跟瞄用）
 g_last_px = 0.5
@@ -450,72 +422,94 @@ def aim_pid_track(dt):
     return False, False
 
 # =============================================================================
-# LINE VISION（巡线专用；与行人检测分开，改这里不影响 LOCK/FIRE）
+# LINE VISION（巡线专用；与行人检测分开）
 # =============================================================================
 def line_info_raw():
     return vision_ctrl.get_line_detection_info()
 
+def _cx_ok(cx):
+    """归一化 x 合法：允许 0~1 边界（旧版 >0 且 <1 会误杀）。"""
+    try:
+        v = float(cx)
+    except Exception:
+        return False, 0.5
+    if v >= 0.0 and v <= 1.0:
+        return True, v
+    return False, 0.5
+
 def line_parse_cx(info):
     """
-    解析线中心 x（归一化 0~1，0.5=画面中心）。
-    文档/示例：有效时列表长度多为 42；info[2] 为线点数；info[19] 为常用 x。
-    返回 (ok, cx, info_len)
+    对齐 DJI 实验室 Line Follower：
+      if len(LineList) == 42 and LineList[2] >= 1: x = LineList[19]
+    返回 (ok, cx, info_len, pts)
     """
     try:
         n = len(info)
     except Exception:
-        return False, 0.5, 0
-    if n < 3:
-        return False, 0.5, n
+        return False, 0.5, 0, 0
+    pts = 0
     try:
-        if info[2] is None or int(info[2]) < 1:
-            return False, 0.5, n
+        if n > 2 and info[2] is not None:
+            pts = int(info[2])
     except Exception:
-        return False, 0.5, n
-    # 优先官方示例下标 19
-    if n > 19:
-        try:
-            cx = info[19]
-            if cx is not None and cx > 0.0 and cx < 1.0:
-                return True, cx, n
-        except Exception:
-            pass
-    # 兜底：若结构是 [.., x0,y0,x1,y1,...] 从 index 3 起取前几个点平均 x
-    if n >= 7:
+        pts = 0
+    # 官方路径：长度 42 + 点数>=1 + [19]
+    if n >= 42 and pts >= 1:
+        ok, cx = _cx_ok(info[19])
+        if ok:
+            return True, cx, n, pts
+        # 邻近下标兜底
+        for idx in (18, 20, 17, 21):
+            try:
+                ok, cx = _cx_ok(info[idx])
+                if ok:
+                    return True, cx, n, pts
+            except Exception:
+                pass
+    # 较短列表但仍有点数
+    if n > 19 and pts >= 1:
+        ok, cx = _cx_ok(info[19])
+        if ok:
+            return True, cx, n, pts
+    # 从点列平均 x（下标 3 起 x,y 交错）
+    if pts >= 1 and n >= 7:
         try:
             s = 0.0
             c = 0
             i = 3
-            while i + 1 < n and c < 5:
-                xi = info[i]
-                if xi is not None and xi > 0.0 and xi < 1.0:
+            while i < n and c < 8:
+                ok, xi = _cx_ok(info[i])
+                if ok:
                     s = s + xi
                     c = c + 1
                 i = i + 2
             if c > 0:
-                return True, s / c, n
+                return True, s / c, n, pts
         except Exception:
             pass
-    return False, 0.5, n
+    return False, 0.5, n, pts
 
 def line_raw_seen():
     if FORCE_NO_LINE:
         return False
-    ok, cx, n = line_parse_cx(line_info_raw())
+    ok, cx, n, pts = line_parse_cx(line_info_raw())
     return ok
 
 def line_update():
-    global g_line_hit, g_line_miss, g_line_cx, g_line_info_len
+    global g_line_hit, g_line_miss, g_line_cx, g_line_info_len, g_line_pts, g_line_ever_ok
     if FORCE_NO_LINE:
         g_line_miss = g_line_miss + 1
         g_line_hit = 0
+        g_line_pts = 0
         return
-    ok, cx, n = line_parse_cx(line_info_raw())
+    ok, cx, n, pts = line_parse_cx(line_info_raw())
     g_line_info_len = n
+    g_line_pts = pts
     if ok:
         g_line_cx = cx
         g_line_hit = g_line_hit + 1
         g_line_miss = 0
+        g_line_ever_ok = True
     else:
         g_line_miss = g_line_miss + 1
         g_line_hit = 0
@@ -524,7 +518,7 @@ def line_stable_true():
     return g_line_hit >= LINE_CONFIRM_FRAMES
 
 def line_stable_false():
-    # 正在循线时用略长丢线窗口，减轻运动模糊误触发
+    """连续 miss 达到阈值（跟线中用更长窗口）。"""
     need = LINE_CONFIRM_FRAMES
     if g_patrol_line_t0 > 0.0:
         need = LINE_LOST_FRAMES
@@ -555,9 +549,9 @@ def log_heartbeat():
         age = 0.0
         if g_patrol_line_t0 > 0:
             age = t - g_patrol_line_t0
-        extra = " mode=%s lineHit=%d miss=%d follow=%.1f pitch=%.0f cx=%.2f err=%.2f gyaw=%.0f n=%d" % (
+        extra = " mode=%s lineHit=%d miss=%d follow=%.1f pitch=%.0f cx=%.2f err=%.2f gyaw=%.0f n=%d pts=%d" % (
             g_mode_tag, g_line_hit, g_line_miss, age, pit,
-            g_line_cx, g_line_err, g_line_yaw_spd, g_line_info_len
+            g_line_cx, g_line_err, g_line_yaw_spd, g_line_info_len, g_line_pts
         )
     elif g_state == STATE_SCAN or g_state == STATE_LOST_SCAN:
         extra = " mode=%s qi=%d/%d seg=%s tgt=%.0f yaw=%.0f pitch=%.0f pHit=%d person=%s" % (
@@ -671,36 +665,43 @@ def mode_ensure_free(reason):
     g_mode_tag = "free"
     log("MODE free | %s" % reason)
 
-def mode_ensure_gimbal_lead(reason):
+def mode_ensure_line_follow(reason):
     """
-    仅 PATROL 循线使用：云台优先，底盘跟随云台偏航。
-    进 PATROL 时必须重新 set_mode（从 free 切回来），不能假设模式还在。
+    PATROL 循线模式：与 DJI 实验室 Line Follower 示例一致，
+    使用 robot_mode_chassis_follow + 云台转速对准线 + 底盘前进。
+    （进 SCAN/射击前必须 mode_ensure_free）
     """
     global g_mode_tag
-    robot_ctrl.set_mode(rm_define.robot_mode_gimbal_follow)
+    robot_ctrl.set_mode(rm_define.robot_mode_chassis_follow)
     try:
-        chassis_ctrl.set_follow_gimbal_offset(0)
+        gimbal_ctrl.set_follow_chassis_offset(0)
     except Exception:
         pass
-    g_mode_tag = "gimbal_lead"
-    log("MODE gimbal_lead | %s" % reason)
+    g_mode_tag = "line_follow"
+    log("MODE line_follow(chassis_follow) | %s" % reason)
 
 # 兼容旧名
 def mode_free_halt():
     mode_ensure_free("mode_free_halt")
 
 def mode_gimbal_lead():
-    mode_ensure_gimbal_lead("mode_gimbal_lead")
+    mode_ensure_line_follow("mode_gimbal_lead_compat")
+
+def mode_ensure_gimbal_lead(reason):
+    mode_ensure_line_follow(reason)
 
 def line_follow_step():
     """
-    蓝线不在画面中心时：用云台 yaw 速度指向线；底盘只前进。
-    文档 yaw：正值右转。线在右 (cx>0.5) → 正 yaw。
-    无线/解析失败：停走，避免盲目前进出环。
+    DJI 示例逻辑：
+      pid error = x - 0.5
+      gimbal.rotate_with_speed(out, 0)
+      chassis.set_trans_speed(...); chassis.move(0)
+    无线：停走，禁止盲目前进。
     """
-    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_info_len
-    ok, cx, n = line_parse_cx(line_info_raw())
+    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_info_len, g_line_pts
+    ok, cx, n, pts = line_parse_cx(line_info_raw())
     g_line_info_len = n
+    g_line_pts = pts
     if ok == False:
         g_line_yaw_spd = 0.0
         g_line_err = 0.0
@@ -716,11 +717,10 @@ def line_follow_step():
     if abs(err) < LINE_CX_DEADZONE:
         yaw_spd = 0.0
     else:
-        # 与官方 PID 示例同向：error = x-0.5，输出驱动云台
+        # 官方 PID 同向：error = x-0.5，输出驱动云台
         yaw_spd = err * LINE_GIMBAL_KP
         yaw_spd = clamp(yaw_spd, -LINE_GIMBAL_YAW_MAX, LINE_GIMBAL_YAW_MAX)
     g_line_yaw_spd = yaw_spd
-    # 大偏差时减速，减小冲出封闭环
     speed = LINE_SPEED
     ae = abs(err)
     if ae > 0.12:
@@ -735,7 +735,6 @@ def line_follow_step():
         chassis_ctrl.set_trans_speed(speed)
         chassis_ctrl.move(0)
     except Exception:
-        # 兜底：部分固件用 move_with_speed 前进（不在 free 下自转）
         try:
             chassis_ctrl.move_with_speed(speed, 0, 0)
         except Exception:
@@ -819,9 +818,12 @@ def fire_bead_pulse_once():
 def fire_bead_burst_tick():
     """
     连击窗口内周期调用：距上次脉冲 ≥ FIRE_PULSE_INTERVAL 再 fire_once。
-    fire_once 为阻塞块，间隔取 0.30s，兼顾射速与跟瞄。
+    当前帧看不到人且 miss 已升高 → 不射（避免对着空地/地面打）。
     """
     if ENABLE_FIRE == False:
+        return
+    # 无人且已丢几帧：停脉冲（仍由 person_confirmed_lost 决定是否退出 FIRE）
+    if people_seen() == False and g_person_miss >= 6:
         return
     if g_last_shot_t <= 0.0:
         fire_bead_pulse_once()
@@ -971,7 +973,7 @@ def set_state(s, reason):
     global g_state, g_state_t0, g_no_person_t0, g_person_miss
     global g_patrol_line_t0, g_fire_count, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_have_last_person
-    global g_last_px, g_last_py
+    global g_last_px, g_last_py, g_line_ever_ok
     old = g_state
     g_state = s
     g_state_t0 = now_s()
@@ -985,12 +987,12 @@ def set_state(s, reason):
         fire_stop()
         mode_ensure_free("enter_%s" % state_name(s))
 
-    # ----- PATROL：先 free 低头归中，再重新打开云台跟随 -----
+    # ----- PATROL：free 低头后切 chassis_follow 循线 -----
     if s == STATE_PATROL:
         fire_stop()
         mode_ensure_free("patrol_before_pose")
         gimbal_pose_line()
-        mode_ensure_gimbal_lead("patrol_start")
+        mode_ensure_line_follow("patrol_start")
         gimbal_set_pitch_line()
         fx_patrol()
         g_patrol_line_t0 = 0.0
@@ -999,9 +1001,11 @@ def set_state(s, reason):
         g_line_cx = 0.5
         g_line_err = 0.0
         g_line_yaw_spd = 0.0
+        g_line_ever_ok = False
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
-        log("PATROL ready gimbal_lead line_spd=%.2f kp=%.0f" % (LINE_SPEED, LINE_GIMBAL_KP))
+        vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
+        log("PATROL ready line_follow spd=%.2f kp=%.0f" % (LINE_SPEED, LINE_GIMBAL_KP))
 
     # ----- SCAN：free 下完整两遍 -----
     if s == STATE_SCAN:
@@ -1067,10 +1071,11 @@ def set_state(s, reason):
 
 def tick_patrol():
     """
-    PATROL（必须已是 gimbal_lead）:
-      见人 → LOCK（set_state 内切 free）
-      丢线 → SCAN（set_state 内切 free）
-      有线：转云台纠偏 + 底盘前进；满 T_MOVE → SCAN
+    PATROL（chassis_follow 循线）:
+      见人 → LOCK
+      曾识别到线后稳定丢线 → SCAN
+      从未识别到线：最多等 3s 再 SCAN（避免 1.12「有线解析失败立刻扫」）
+      有线稳定：云台对准线 + 前进 T_MOVE → SCAN
     """
     global g_patrol_line_t0
     try:
@@ -1084,9 +1089,22 @@ def tick_patrol():
         set_state(STATE_LOCK, "person_on_patrol")
         return
     if line_stable_false():
-        g_patrol_line_t0 = 0.0
-        person_hit_reset()
-        set_state(STATE_SCAN, "no_line_stable")
+        if g_line_ever_ok:
+            g_patrol_line_t0 = 0.0
+            person_hit_reset()
+            set_state(STATE_SCAN, "no_line_stable")
+            return
+        # 从未识别成功：不要秒进 SCAN；超时再扫
+        if state_age() >= 3.0:
+            log("PATROL no line ever pts=%d n=%d -> SCAN" % (g_line_pts, g_line_info_len))
+            g_patrol_line_t0 = 0.0
+            set_state(STATE_SCAN, "no_line_timeout")
+            return
+        chassis_halt()
+        try:
+            gimbal_ctrl.rotate_with_speed(0, 0)
+        except Exception:
+            pass
         return
     if line_stable_true() == False:
         chassis_halt()
@@ -1097,11 +1115,10 @@ def tick_patrol():
         return
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
-        # 开始跟线前再钉一次云台跟随（防止中途被改模式）
-        mode_ensure_gimbal_lead("patrol_follow_begin")
+        mode_ensure_line_follow("patrol_follow_begin")
         gimbal_set_pitch_line()
-        log("PATROL line stable follow %.1fs pitch=%.0f cx=%.2f" % (
-            T_MOVE, get_pitch(), g_line_cx
+        log("PATROL line stable follow %.1fs pitch=%.0f cx=%.2f pts=%d n=%d" % (
+            T_MOVE, get_pitch(), g_line_cx, g_line_pts, g_line_info_len
         ))
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
@@ -1210,7 +1227,6 @@ def tick_fire():
         return
 
     if g_fire_phase == FIRE_PHASE_BURST_ON:
-        # 窗口内持续脉冲射击
         if phase_age() < T_BURST_ON:
             fire_bead_burst_tick()
             return
@@ -1218,11 +1234,18 @@ def tick_fire():
         fx_fire_wait_led()
         g_fire_phase = FIRE_PHASE_BURST_WAIT
         g_phase_t0 = now_s()
-        log("FIRE wait %.1fs (person still tracked)" % T_BURST_WAIT)
+        log("FIRE wait %.1fs" % T_BURST_WAIT)
         return
 
     if g_fire_phase == FIRE_PHASE_BURST_WAIT:
         if phase_age() >= T_BURST_WAIT:
+            # 等待结束时必须仍能看到人，否则不进入下一轮连射
+            if people_seen() == False:
+                log("FIRE wait end no person -> stop burst")
+                if person_confirmed_lost():
+                    fire_stop()
+                    set_state(STATE_LOST_SCAN, "person_lost_after_wait")
+                return
             g_fire_phase = FIRE_PHASE_BURST_ON
             g_phase_t0 = now_s()
             fire_bead_burst_start()
@@ -1269,14 +1292,14 @@ def setup():
     fx_patrol()
     pid_reset_aim()
     person_hit_reset()
-    log("setup done v1.12.0 scan=%.0f pitchLine=%d lineSpd=%.2f gKP=%.0f" % (
+    log("setup done v1.13.0 scan=%.0f pitchLine=%d lineSpd=%.2f gKP=%.0f" % (
         SCAN_YAW_SPEED, PITCH_LINE, LINE_SPEED, LINE_GIMBAL_KP
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.12.0 stamp=2026-08-04 13:00:37")
+    print("# LINE_GUARD_VERSION=1.13.0 stamp=2026-08-04 13:06:31")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
