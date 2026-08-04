@@ -26,7 +26,8 @@ Mac 仓库可继续用多文件做草稿，**上车前合并为单文件**。
 
 | 文件 | 说明 |
 |---|---|
-| **`line_guard.py`** | **正式 v1 哨兵程序**（单文件，粘贴运行） |
+| **`line_guard.py`** | **正式哨兵程序**（单文件，粘贴运行） |
+| `line_pitch_test.py` | **蓝线 × 俯仰角** 扫描测试（推荐 PITCH_LINE） |
 | `led_color_test.py` | 彩灯测试（验证 App 环境） |
 | `config.py` / `main.py` | 早期占位，可忽略 |
 
