@@ -1,46 +1,39 @@
-# 设计备忘（实现前）
+# 设计备忘
 
-本文不是正式代码，只记录实现时要注意的映射与坑。
+## 权威行为规格
 
-## 状态与职责
+**状态机与已定业务规则以 [`behavior-spec.md`](./behavior-spec.md) 为准。**
 
-| 状态 | 底盘 | 云台 | 视觉 | 灯 | 枪 |
-|---|---|---|---|---|---|
-| INIT | 停 | 巡线俯角 | 开线+行人 | 常态 | 关 |
-| PATROL | 循线 | 固定俯角 | 线优先 | 常态 | 关 |
-| SCAN | **必须停** | 扫人俯仰 + yaw 扫描 | 行人 | 常态/微闪 | 关 |
-| LOCK | 停 | 指向人 | 行人 | **红闪** | 关（计时中） |
-| FIRE | 停 | 保持指向 | 行人 | 红闪 | **每 1s 点射** |
-| RECOVER | 慢速找线 | 回巡线俯角 | 线 | 恢复常态 | 关 |
+改 `onboard/line_guard.py` 前必须对照该文档，避免引入与已定逻辑冲突的参数（例如历史上的空扫上限、脱战冷却、FIRE 总时长强制退出）。
 
-## 控制权切换原则
+---
 
-1. 进入 SCAN / LOCK / FIRE 前：底盘 `stop`。  
-2. 离开 FIRE/LOCK 前：停止射击循环。  
-3. RECOVER 完成「重新看到线」后再进 PATROL，避免盲开。  
+## 实现注意（API / 坑）
 
-## API 方向（以 App 实验室实际枚举为准）
+### 控制权
 
-实现时以当前 App /《编程指南》为准，下列仅为方向：
+1. 进入 SCAN / LOCK / FIRE 前：底盘 `stop`，`robot_mode_free`。  
+2. PATROL：`robot_mode_chassis_follow` + 官方 RmList 循线。  
+3. 离开 FIRE/LOCK 前：`gun_ctrl.stop` 等停火。
 
-- 线：`vision_ctrl` 线识别 enable、颜色 blue、曝光  
-- 人：行人 detection enable；事件或查询「是否看到人」  
-- 云台：yaw/pitch 控制、瞄准/跟随类接口（若有）  
-- 底盘：循线相关或「线信息 + 轮速」自写（视 API 丰富程度）  
-- LED：底部/云台红色 + flash  
-- 音效：内置 `media_ctrl` 警示音；自定义 MP3 见 README 限制  
-- 枪：`gun_ctrl.fire_once` 一类单发接口  
+### 阻塞与 sleep
 
-## 「人还在」判定
+- `yaw_ctrl` / `pitch_ctrl` / `angle_ctrl` / `rotate_with_degree`：执行块，**到位后返回**；勿再叠 sleep「等硬件」。  
+- `rotate_with_speed`：速度环，需自行 `stop`。  
+- `fire_once`：阻塞；`fire_continuous`：非阻塞。
 
-车端无精确测距，建议：
+### 线 / 人
 
-- LOCK/FIRE 中周期性检查「当前是否仍识别到人」  
-- 连续 `T_clear` 秒为假 → 离开  
-- 可加简单防抖：单帧丢失不立刻退出  
+- 线：必须 `RmList(get_line_detection_info())`，`len==42` 且点数有效，`cx=[19]`。  
+- 人：`enable_detection(people)`；轮询 `get_people_detection_info` 或官方 `cond_wait`（阻塞，不宜插在步进 SCAN 中途单独依赖）。  
+- 行人误检（沙发/行李）官方无更好过滤器；几何启发式不可靠。
 
-## 非目标
+### 水弹
 
-- 外部 PC SDK、Root/解锁  
+- 约 **俯仰 >10°** 机内禁止水晶弹；扫人抬头可能导致「有 BURST 日志但无弹」。
+
+### 非目标
+
+- 外部 PC SDK、Root  
 - Mac 实时图传闭环  
-- 黑线、严格 1m、边走边连续扫视  
+- 黑线巡线  

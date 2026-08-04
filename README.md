@@ -6,7 +6,9 @@
 - **S1 上**：粘贴 `onboard/` 程序后全自动运行  
 - **不需要** Mac 与 S1 实时传数据；功能闭环全部在车上完成  
 
-> 当前阶段：需求与骨架已冻结，**车载控制逻辑尚未实现**。
+> **行为规格（改代码必读）：** [`docs/behavior-spec.md`](docs/behavior-spec.md)  
+> 实现备忘：[`docs/design-notes.md`](docs/design-notes.md)  
+> 车载程序：`onboard/line_guard.py`（单文件粘贴进 App 实验室）
 
 仓库：<https://github.com/dead-lee/s1-line-guard>
 
