@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.17.0 stamp=2026-08-04 17:10:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.18.0 stamp=2026-08-04 17:15:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.17 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.18 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -54,15 +54,18 @@ PERSON_FIRE_MIN_H = 0.12
 PITCH_LINE = -20
 PITCH_SCAN = 20
 
-# --- SCAN ---
-SCAN_HALF = 180.0
+# --- SCAN（日志 17:12：回中 yaw 卡 233 过久；整段 SCAN 太长像死循环）---
+# 队列改为：+A → -B → 0（一侧、对侧、回中），不再 +A→0→-B→0 四段
+SCAN_HALF = 160.0
 SCAN_SIDE_A = SCAN_HALF
 SCAN_SIDE_B = -SCAN_HALF
-SCAN_YAW_SPEED = 120.0
-YAW_ARRIVE = 8.0
-SCAN_STUCK_FRAMES = 12
+SCAN_YAW_SPEED = 200.0
+YAW_ARRIVE = 10.0
+SCAN_STUCK_FRAMES = 8
 HOME_YAW_SPEED = 500.0
 HOME_TIMEOUT_S = 3.0
+# 整次 SCAN 最长秒数，超时强制 RECOVER
+T_SCAN_MAX = 16.0
 
 # --- PATROL 巡线（与官方 PID 示例一致）---
 LINE_SPEED = 0.30
@@ -957,21 +960,31 @@ def fire_bead_burst_stop():
     log("BURST_STOP shots=%d" % g_burst_shots)
 
 # =============================================================================
-# SCAN 核心：完整两遍 [ +180, 0, -180, 0 ]
+# SCAN 核心：[+A, -B, 0]  一侧 → 对侧 → 回中（更快，不易卡）
 # =============================================================================
 def scan_queue_full_two_rounds():
-    return [SCAN_SIDE_A, 0.0, SCAN_SIDE_B, 0.0]
+    return [SCAN_SIDE_A, SCAN_SIDE_B, 0.0]
 
 def scan_seg_label(qi, target):
     if qi == 0:
-        return "R1_to_%+.0f" % target
+        return "to_%+.0f" % target
     if qi == 1:
-        return "R1_home_0"
+        return "to_%+.0f" % target
     if qi == 2:
-        return "R2_to_%+.0f" % target
-    if qi == 3:
-        return "R2_home_0"
+        return "home_0"
     return "qi%d_to_%+.0f" % (qi, target)
+
+def scan_snap_yaw(tgt, reason):
+    """卡顿或回中：绝对 yaw_ctrl 一次到位（可靠）。"""
+    gimbal_stop()
+    set_gimbal_speed(HOME_YAW_SPEED)
+    log("SCAN snap yaw=%.0f | %s" % (tgt, reason))
+    try:
+        gimbal_ctrl.yaw_ctrl(tgt)
+    except Exception:
+        pass
+    time.sleep(0.05)
+    gimbal_stop()
 
 def gimbal_fast_home(reason, keep_scan_pitch=False):
     """
@@ -1045,20 +1058,33 @@ def scan_start_full(reason):
     ))
 
 def scan_tick_turn():
+    """
+    朝绝对目标转。
+    - 回中(tgt≈0) / 卡住 / 接近终点：yaw_ctrl 绝对到位（避免 yaw=233 空转）
+    - 否则 rotate_with_speed 快扫
+    """
     global g_scan_last_yaw, g_scan_stuck
     yaw = get_yaw()
-    err = g_scan_target_yaw - yaw
+    tgt = g_scan_target_yaw
+    err = tgt - yaw
     if abs(err) <= YAW_ARRIVE:
-        log("SCAN arrive yaw=%.0f tgt=%.0f seg=%s" % (yaw, g_scan_target_yaw, g_scan_seg_name))
+        log("SCAN arrive yaw=%.0f tgt=%.0f seg=%s" % (yaw, tgt, g_scan_seg_name))
+        gimbal_stop()
         return True
     d = yaw - g_scan_last_yaw
-    if abs(d) < 0.35:
+    if abs(d) < 0.4:
         g_scan_stuck = g_scan_stuck + 1
     else:
         g_scan_stuck = 0
     g_scan_last_yaw = yaw
+    if abs(tgt) < 0.1:
+        scan_snap_yaw(0.0, "home_abs")
+        return True
     if g_scan_stuck >= SCAN_STUCK_FRAMES:
-        log("SCAN stuck yaw=%.0f tgt=%.0f -> done" % (yaw, g_scan_target_yaw))
+        scan_snap_yaw(tgt, "stuck_snap")
+        return True
+    if abs(err) < 25.0:
+        scan_snap_yaw(tgt, "near_snap")
         return True
     spd = SCAN_YAW_SPEED
     if spd < 1.0:
@@ -1252,10 +1278,17 @@ def tick_patrol():
 def tick_scan_common(is_lost):
     """
     SCAN / LOST_SCAN：
-      冷却期不锁人；认人更严；扫完无蓝线不得无限重扫。
+      超时强制退出；认人更严；扫完优先回线，禁止无限空扫。
     """
     global g_scan_empty_count
     chassis_halt()
+    # 整次 SCAN 超时 → 强制找线（防止「卡在 SCAN」）
+    if state_age() >= T_SCAN_MAX:
+        log("SCAN timeout age=%.1f -> RECOVER" % state_age())
+        gimbal_stop()
+        person_cooldown_start(T_PERSON_COOLDOWN * 0.5, "scan_timeout")
+        set_state(STATE_RECOVER, "scan_timeout")
+        return
     if person_hit_update(PERSON_HIT_NEED_SCAN):
         gimbal_stop()
         log("SCAN person hit=%d need=%d -> LOCK" % (g_person_hit, PERSON_HIT_NEED_SCAN))
@@ -1268,7 +1301,8 @@ def tick_scan_common(is_lost):
     adv = scan_advance_or_finish()
     if adv == "next":
         return
-    gimbal_fast_home("scan_two_rounds_done", keep_scan_pitch=False)
+    # 队列已跑完（最后一段是 0），再确认低头找线
+    gimbal_fast_home("scan_queue_done", keep_scan_pitch=False)
     if is_lost:
         log("LOST_SCAN done -> RECOVER")
         set_state(STATE_RECOVER, "lost_scan_done")
@@ -1283,16 +1317,12 @@ def tick_scan_common(is_lost):
         log("SCAN done line -> PATROL")
         set_state(STATE_PATROL, "scan_has_line")
         return
-    # 无蓝线：限制重扫次数，避免 SCAN 死循环
+    # 默认不重扫：直接 RECOVER（避免 SCAN 空转）
     g_scan_empty_count = g_scan_empty_count + 1
-    if g_scan_empty_count > SCAN_EMPTY_MAX:
-        log("SCAN empty x%d -> RECOVER (break loop)" % g_scan_empty_count)
-        g_scan_empty_count = 0
-        person_cooldown_start(T_PERSON_COOLDOWN, "scan_empty_break")
-        set_state(STATE_RECOVER, "scan_empty_break")
-        return
-    log("SCAN done no line -> SCAN again (%d/%d)" % (g_scan_empty_count, SCAN_EMPTY_MAX))
-    set_state(STATE_SCAN, "rescan_no_line")
+    log("SCAN done no line -> RECOVER (empty=%d)" % g_scan_empty_count)
+    g_scan_empty_count = 0
+    person_cooldown_start(T_PERSON_COOLDOWN * 0.5, "scan_no_line")
+    set_state(STATE_RECOVER, "scan_no_line")
 
 def tick_scan():
     tick_scan_common(False)
@@ -1458,14 +1488,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.17.0 T_MOVE=%.1f spd=%.2f pulse=%s" % (
-        T_MOVE, LINE_SPEED, str(FIRE_USE_PULSE)
+    log("setup done v1.18.0 T_MOVE=%.1f scan_max=%.0f spd=%.2f" % (
+        T_MOVE, T_SCAN_MAX, LINE_SPEED
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.17.0 stamp=2026-08-04 17:10:00")
+    print("# LINE_GUARD_VERSION=1.18.0 stamp=2026-08-04 17:15:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
