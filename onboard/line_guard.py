@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.16.1 stamp=2026-08-04 17:00:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.17.0 stamp=2026-08-04 17:10:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.16.1 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.17 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -32,12 +32,12 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-T_MOVE = 5.0
+T_MOVE = 6.0
 T_CLEAR = 1.2
 PERSON_MISS_NEED = 12
 PERSON_HIT_NEED = 3
 # SCAN 中认人更严
-PERSON_HIT_NEED_SCAN = 6
+PERSON_HIT_NEED_SCAN = 8
 # PATROL 循线时不锁人（必须先走完 T_MOVE 再扫人）
 PERSON_LOCK_ON_PATROL = False
 LOOP_DT = 0.05
@@ -46,6 +46,9 @@ T_PERSON_COOLDOWN = 12.0
 T_FIRE_MAX = 8.0
 FIRE_MAX_ROUNDS = 1
 SCAN_EMPTY_MAX = 1
+# 开火前必须当前帧仍看见人，且框足够大（减误 IR）
+PERSON_FIRE_MIN_W = 0.10
+PERSON_FIRE_MIN_H = 0.12
 
 # 俯仰：巡线低头 / 扫描上扬（文档 pitch 范围约 -20~+35）
 PITCH_LINE = -20
@@ -89,11 +92,14 @@ PERSON_MIN_H = 0.08
 
 # LOCK 跟瞄多久后红外示警 → FIRE
 T_AIM_BEFORE_IR = 1.2
-# 水弹：非阻塞 fire_continuous 持续 T_BURST_ON，再 wait；主循环不卡在 fire_once
+# 水弹：连击 = 短间隔 fire_once（continuous 官方约 1 发/s，体感不像连击）
+# 主循环仍可跑；单次 fire_once 会短暂阻塞，间隔 0.22s 折中
 T_BURST_ON = 2.0
 T_BURST_WAIT = 3.0
-FIRE_PULSE_INTERVAL = 0.30
-FIRE_BEADS_PER_PULSE = 1
+FIRE_PULSE_INTERVAL = 0.22
+FIRE_BEADS_PER_PULSE = 2
+# True=脉冲连击；False=仅 fire_continuous（约 1Hz）
+FIRE_USE_PULSE = True
 
 ENABLE_FIRE = True
 FORCE_NO_LINE = False
@@ -822,11 +828,31 @@ def fire_stop():
     except Exception:
         pass
 
+def person_fire_ok():
+    """
+    允许 IR/水弹：当前帧真有人，且框够大（过滤远处噪点/地面误检）。
+    """
+    if person_cooldown_active():
+        return False
+    ok, x, y, w, h = people_get_first()
+    if ok == False:
+        return False
+    try:
+        if w < PERSON_FIRE_MIN_W or h < PERSON_FIRE_MIN_H:
+            return False
+    except Exception:
+        return False
+    return True
+
 def fire_ir_warn_once():
-    """红外示警一次：橙灯，无射击配音。"""
+    """红外示警一次；无人/框太小则跳过（避免空放 IR）。"""
     global g_fire_count, g_ir_done
     if g_ir_done:
         log("IR_WARN skip already")
+        return
+    if person_fire_ok() == False:
+        log("IR_WARN skip no solid person")
+        # 不置 ir_done，若之后框变实可再试；但 LOCK 超时会丢
         return
     fx_fire_ir_led()
     if ENABLE_FIRE == False:
@@ -850,40 +876,74 @@ def fire_ir_warn_once():
 
 def fire_bead_burst_start():
     """
-    非阻塞连发：fire_continuous() 立即返回，主循环继续跟瞄/计时。
-    到 T_BURST_ON 后由 fire_bead_burst_stop() 停。
+    连击窗口开始。
+    FIRE_USE_PULSE=True：短间隔 fire_once（连击手感，单次略阻塞）
+    False：fire_continuous（非阻塞，官方约 1 发/s）
     """
     global g_last_shot_t, g_burst_shots, g_fire_count
     if ENABLE_FIRE == False:
         log("BURST_ON skip ENABLE_FIRE=0")
         return
+    if person_fire_ok() == False:
+        log("BURST_ON skip no solid person")
+        return
     fx_fire_burst_led()
-    g_last_shot_t = now_s()
-    g_burst_shots = g_burst_shots + 1
-    g_fire_count = g_fire_count + 1
-    try:
-        gun_ctrl.set_fire_count(FIRE_BEADS_PER_PULSE)
-        gun_ctrl.fire_continuous()
-        log("BURST_ON continuous %.1fs (non-block)" % T_BURST_ON)
-    except Exception:
-        # 兜底单发（可能阻塞一小下）
+    g_last_shot_t = 0.0
+    g_burst_shots = 0
+    if FIRE_USE_PULSE == False:
         try:
-            gun_ctrl.fire_once()
-            log("BURST_ON fallback fire_once")
+            gun_ctrl.set_fire_count(FIRE_BEADS_PER_PULSE)
+            gun_ctrl.fire_continuous()
+            g_last_shot_t = now_s()
+            g_burst_shots = 1
+            log("BURST_ON continuous %.1fs" % T_BURST_ON)
         except Exception:
-            log("BURST_ON FAIL")
+            log("BURST continuous FAIL")
+        return
+    # 脉冲连击：立刻第一发
+    fire_bead_pulse_once()
+    log("BURST_ON pulse interval=%.2fs beads=%d for %.1fs" % (
+        FIRE_PULSE_INTERVAL, FIRE_BEADS_PER_PULSE, T_BURST_ON
+    ))
 
-def fire_bead_burst_tick():
-    """
-    continuous 已在跑：主循环只检查「无人则提前 stop」，不调用阻塞 fire_once。
-    """
+def fire_bead_pulse_once():
+    global g_last_shot_t, g_burst_shots, g_fire_count
     if ENABLE_FIRE == False:
         return
-    if people_seen() == False and g_person_miss >= 6:
+    if person_fire_ok() == False:
+        return
+    n = FIRE_BEADS_PER_PULSE
+    if n < 1:
+        n = 1
+    if n > 8:
+        n = 8
+    try:
+        gun_ctrl.set_fire_count(n)
+        gun_ctrl.fire_once()
+        g_burst_shots = g_burst_shots + 1
+        g_fire_count = g_fire_count + 1
+        g_last_shot_t = now_s()
+        log("BURST pulse #%d beads=%d" % (g_burst_shots, n))
+    except Exception:
+        log("BURST pulse fail")
+
+def fire_bead_burst_tick():
+    """连击窗口内：脉冲补发或 continuous 保活；无人则停。"""
+    if ENABLE_FIRE == False:
+        return
+    if person_fire_ok() == False:
         try:
             gun_ctrl.stop()
         except Exception:
             pass
+        return
+    if FIRE_USE_PULSE == False:
+        return
+    if g_last_shot_t <= 0.0:
+        fire_bead_pulse_once()
+        return
+    if (now_s() - g_last_shot_t) >= FIRE_PULSE_INTERVAL:
+        fire_bead_pulse_once()
 
 def fire_bead_burst_stop():
     try:
@@ -894,7 +954,7 @@ def fire_bead_burst_stop():
         led_ctrl.gun_led_off()
     except Exception:
         pass
-    log("BURST_STOP (continuous off) round done")
+    log("BURST_STOP shots=%d" % g_burst_shots)
 
 # =============================================================================
 # SCAN 核心：完整两遍 [ +180, 0, -180, 0 ]
@@ -1183,8 +1243,10 @@ def tick_patrol():
         ))
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
+        age = now_s() - g_patrol_line_t0
         g_patrol_line_t0 = 0.0
         person_hit_reset()
+        log("PATROL follow done age=%.2fs need=%.1f -> SCAN" % (age, T_MOVE))
         set_state(STATE_SCAN, "follow_time_up")
 
 def tick_scan_common(is_lost):
@@ -1252,8 +1314,14 @@ def tick_lock():
         leave_combat_to_recover("lock_cooldown")
         return
     if g_ir_done == False and state_age() >= T_AIM_BEFORE_IR:
-        if g_have_last_person and g_person_miss < PERSON_MISS_NEED:
-            fire_ir_warn_once()
+        if person_fire_ok() == False:
+            # 超时仍无实框：不当入侵，回找线
+            if state_age() >= (T_AIM_BEFORE_IR + 1.5):
+                log("LOCK aim timeout no solid person -> RECOVER")
+                leave_combat_to_recover("lock_no_solid_person")
+            return
+        fire_ir_warn_once()
+        if g_ir_done:
             g_fire_phase = FIRE_PHASE_IR_DONE
             g_phase_t0 = now_s()
             log("LOCK IR warn -> FIRE")
@@ -1283,7 +1351,13 @@ def tick_fire():
 
     if g_ir_done == False:
         if state_age() >= T_AIM_BEFORE_IR:
+            if person_fire_ok() == False:
+                if state_age() >= T_FIRE_MAX * 0.5:
+                    leave_combat_to_recover("fire_no_solid_person")
+                return
             fire_ir_warn_once()
+            if g_ir_done == False:
+                return
             g_fire_phase = FIRE_PHASE_BURST_ON
             g_phase_t0 = now_s()
             g_fire_rounds = 1
@@ -1291,6 +1365,9 @@ def tick_fire():
         return
 
     if g_fire_phase == FIRE_PHASE_IR_DONE:
+        if person_fire_ok() == False:
+            leave_combat_to_recover("fire_ir_done_no_person")
+            return
         g_fire_phase = FIRE_PHASE_BURST_ON
         g_phase_t0 = now_s()
         g_fire_rounds = 1
@@ -1381,12 +1458,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.16.1 T_MOVE=%.1f line_spd=%.2f" % (T_MOVE, LINE_SPEED))
+    log("setup done v1.17.0 T_MOVE=%.1f spd=%.2f pulse=%s" % (
+        T_MOVE, LINE_SPEED, str(FIRE_USE_PULSE)
+    ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.16.1 stamp=2026-08-04 17:00:00")
+    print("# LINE_GUARD_VERSION=1.17.0 stamp=2026-08-04 17:10:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
