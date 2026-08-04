@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.18.0 stamp=2026-08-04 17:15:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.19.0 stamp=2026-08-04 17:25:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.18 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.19 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -54,18 +54,20 @@ PERSON_FIRE_MIN_H = 0.12
 PITCH_LINE = -20
 PITCH_SCAN = 20
 
-# --- SCAN（日志 17:12：回中 yaw 卡 233 过久；整段 SCAN 太长像死循环）---
-# 队列改为：+A → -B → 0（一侧、对侧、回中），不再 +A→0→-B→0 四段
-SCAN_HALF = 160.0
-SCAN_SIDE_A = SCAN_HALF
-SCAN_SIDE_B = -SCAN_HALF
-SCAN_YAW_SPEED = 200.0
-YAW_ARRIVE = 10.0
+# --- SCAN（v1.19：绝对角 + 设定角速度，不用速度环蹭到位）---
+# 几何（从中心 0 起，文档 yaw 正≈右转/顺时针侧）：
+#   回中 → 顺时针 180 → 逆时针 180 回中 → 逆时针 180 → 顺时针 180 回中 → 回中
+# 绝对目标队列（每段 set_rotate_speed 后 yaw_ctrl(目标)）：
+#   [ +180, 0, -180, 0 ]
+# 若实车顺/逆与符号相反：对调 SCAN_CW / SCAN_CCW
+SCAN_CW = 180.0
+SCAN_CCW = -180.0
+SCAN_YAW_SPEED = 180.0
+YAW_ARRIVE = 8.0
 SCAN_STUCK_FRAMES = 8
-HOME_YAW_SPEED = 500.0
+HOME_YAW_SPEED = 360.0
 HOME_TIMEOUT_S = 3.0
-# 整次 SCAN 最长秒数，超时强制 RECOVER
-T_SCAN_MAX = 16.0
+T_SCAN_MAX = 25.0
 
 # --- PATROL 巡线（与官方 PID 示例一致）---
 LINE_SPEED = 0.30
@@ -960,38 +962,44 @@ def fire_bead_burst_stop():
     log("BURST_STOP shots=%d" % g_burst_shots)
 
 # =============================================================================
-# SCAN 核心：[+A, -B, 0]  一侧 → 对侧 → 回中（更快，不易卡）
+# SCAN 核心：set_rotate_speed + yaw_ctrl(绝对角)
+# 顺序：回中 → 顺时针180 → 逆时针回中 → 逆时针180 → 顺时针回中
+# 每段由 S1 闭环转到目标角，段与段之间才查人（不边转边用速度环蹭）
 # =============================================================================
 def scan_queue_full_two_rounds():
-    return [SCAN_SIDE_A, SCAN_SIDE_B, 0.0]
+    # 已在中心前提下：CW180 → 0 → CCW180 → 0
+    return [SCAN_CW, 0.0, SCAN_CCW, 0.0]
 
 def scan_seg_label(qi, target):
     if qi == 0:
-        return "to_%+.0f" % target
+        return "R1_CW_to_%+.0f" % target
     if qi == 1:
-        return "to_%+.0f" % target
+        return "R1_CCW_to_0"
     if qi == 2:
-        return "home_0"
+        return "R2_CCW_to_%+.0f" % target
+    if qi == 3:
+        return "R2_CW_to_0"
     return "qi%d_to_%+.0f" % (qi, target)
 
-def scan_snap_yaw(tgt, reason):
-    """卡顿或回中：绝对 yaw_ctrl 一次到位（可靠）。"""
+def scan_yaw_abs(tgt, reason):
+    """
+    设定角速度后，绝对转到 tgt（度）。
+    使用官方 yaw_ctrl，由机内闭环完成，不靠速度×时间。
+    """
     gimbal_stop()
-    set_gimbal_speed(HOME_YAW_SPEED)
-    log("SCAN snap yaw=%.0f | %s" % (tgt, reason))
+    set_gimbal_speed(SCAN_YAW_SPEED)
+    y0 = get_yaw()
+    log("SCAN yaw_ctrl %.0f -> %.0f spd=%.0f | %s" % (y0, tgt, SCAN_YAW_SPEED, reason))
     try:
         gimbal_ctrl.yaw_ctrl(tgt)
     except Exception:
-        pass
+        log("SCAN yaw_ctrl FAIL tgt=%.0f" % tgt)
     time.sleep(0.05)
     gimbal_stop()
+    log("SCAN yaw_done tgt=%.0f now=%.0f" % (tgt, get_yaw()))
 
 def gimbal_fast_home(reason, keep_scan_pitch=False):
-    """
-    回 yaw=0。
-    keep_scan_pitch=True  → 保持/设为扫描俯仰（扫前归零）
-    keep_scan_pitch=False → 同时低头到 PITCH_LINE（扫完回巡线）
-    """
+    """回中：同样用绝对角 + 设定速度。"""
     gimbal_stop()
     fx_recenter()
     yaw0 = get_yaw()
@@ -1003,7 +1011,6 @@ def gimbal_fast_home(reason, keep_scan_pitch=False):
     log("HOME begin yaw=%.0f pitch=%.0f | %s" % (yaw0, pit0, reason))
     set_gimbal_speed(HOME_YAW_SPEED)
     if keep_scan_pitch:
-        # 扫人姿态：0 航向 + 上扬
         try:
             gimbal_ctrl.angle_ctrl(0, PITCH_SCAN)
         except Exception:
@@ -1012,10 +1019,9 @@ def gimbal_fast_home(reason, keep_scan_pitch=False):
             except Exception:
                 pass
             gimbal_set_pitch_scan()
-        time.sleep(0.1)
+        time.sleep(0.08)
         gimbal_set_pitch_scan()
     else:
-        # 巡线姿态：0 航向 + 低头（angle_ctrl 一次锁死两轴）
         gimbal_pose_line()
     gimbal_stop()
     log("HOME done yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
@@ -1029,71 +1035,50 @@ def scan_load_segment(qi):
     g_scan_seg_name = scan_seg_label(qi, g_scan_target_yaw)
     if abs(g_scan_target_yaw) < 0.1:
         fx_recenter()
-        log("SCAN seg qi=%d %s (回中段)" % (qi, g_scan_seg_name))
     else:
         fx_scan_seg(g_scan_seg_name)
-        log("SCAN seg qi=%d %s yaw0=%.0f" % (qi, g_scan_seg_name, g_scan_last_yaw))
+    log("SCAN seg qi=%d %s yaw0=%.0f" % (qi, g_scan_seg_name, g_scan_last_yaw))
 
 def scan_start_full(reason):
     global g_scan_queue
-    # SCAN 全程 free，禁止云台跟随带着底盘转
     mode_ensure_free("scan_start_full")
     g_scan_queue = scan_queue_full_two_rounds()
     person_hit_reset()
-    # 扫前：必须上扬 + 尽量在中心起扫
-    if abs(get_yaw()) > YAW_ARRIVE:
-        gimbal_fast_home("scan_start_ensure_center", keep_scan_pitch=True)
-        mode_ensure_free("scan_after_home")
-    else:
-        gimbal_pose_scan_yaw0()
+    # 1) 先回中 + 扫人俯仰（用户要求：从回中开始）
+    set_gimbal_speed(HOME_YAW_SPEED)
+    try:
+        gimbal_ctrl.angle_ctrl(0, PITCH_SCAN)
+    except Exception:
+        try:
+            gimbal_ctrl.yaw_ctrl(0)
+        except Exception:
+            pass
+        gimbal_set_pitch_scan()
+    time.sleep(0.1)
+    gimbal_set_pitch_scan()
+    log("SCAN home first yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
     if len(g_scan_queue) <= 0:
         log("SCAN empty queue")
         return
     fx_scan()
-    # 再钉一次扫描俯仰，防止 home 后漂
-    gimbal_set_pitch_scan()
     scan_load_segment(0)
-    log("SCAN full 2-round start n=%d A=%+.0f B=%+.0f spd=%.0f pitch=%d | %s" % (
-        len(g_scan_queue), SCAN_SIDE_A, SCAN_SIDE_B, SCAN_YAW_SPEED, PITCH_SCAN, reason
-    ))
+    log(
+        "SCAN plan: home -> CW%+.0f -> 0 -> CCW%+.0f -> 0 | spd=%.0f | %s"
+        % (SCAN_CW, SCAN_CCW, SCAN_YAW_SPEED, reason)
+    )
 
 def scan_tick_turn():
     """
-    朝绝对目标转。
-    - 回中(tgt≈0) / 卡住 / 接近终点：yaw_ctrl 绝对到位（避免 yaw=233 空转）
-    - 否则 rotate_with_speed 快扫
+    每调用一次：用 yaw_ctrl 把本段绝对目标转完（阻塞在机内闭环）。
+    段间由 tick_scan 查人；不再用 rotate_with_speed + 卡住帧数。
     """
-    global g_scan_last_yaw, g_scan_stuck
-    yaw = get_yaw()
     tgt = g_scan_target_yaw
-    err = tgt - yaw
-    if abs(err) <= YAW_ARRIVE:
-        log("SCAN arrive yaw=%.0f tgt=%.0f seg=%s" % (yaw, tgt, g_scan_seg_name))
-        gimbal_stop()
+    yaw0 = get_yaw()
+    if abs(tgt - yaw0) <= YAW_ARRIVE:
+        log("SCAN skip already at tgt=%.0f yaw=%.0f" % (tgt, yaw0))
         return True
-    d = yaw - g_scan_last_yaw
-    if abs(d) < 0.4:
-        g_scan_stuck = g_scan_stuck + 1
-    else:
-        g_scan_stuck = 0
-    g_scan_last_yaw = yaw
-    if abs(tgt) < 0.1:
-        scan_snap_yaw(0.0, "home_abs")
-        return True
-    if g_scan_stuck >= SCAN_STUCK_FRAMES:
-        scan_snap_yaw(tgt, "stuck_snap")
-        return True
-    if abs(err) < 25.0:
-        scan_snap_yaw(tgt, "near_snap")
-        return True
-    spd = SCAN_YAW_SPEED
-    if spd < 1.0:
-        spd = 1.0
-    if err > 0:
-        gimbal_ctrl.rotate_with_speed(spd, 0)
-    else:
-        gimbal_ctrl.rotate_with_speed(-spd, 0)
-    return False
+    scan_yaw_abs(tgt, g_scan_seg_name)
+    return True
 
 def scan_advance_or_finish():
     global g_scan_qi
@@ -1488,14 +1473,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.18.0 T_MOVE=%.1f scan_max=%.0f spd=%.2f" % (
-        T_MOVE, T_SCAN_MAX, LINE_SPEED
+    log("setup done v1.19.0 T_MOVE=%.1f scan=CW/CCW180 yaw_ctrl spd=%.0f" % (
+        T_MOVE, SCAN_YAW_SPEED
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.18.0 stamp=2026-08-04 17:15:00")
+    print("# LINE_GUARD_VERSION=1.19.0 stamp=2026-08-04 17:25:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
