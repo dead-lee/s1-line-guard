@@ -1,54 +1,52 @@
-# LINE_GUARD_VERSION=1.11.0 stamp=2026-08-04 12:57:12  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.12.0 stamp=2026-08-04 13:00:37  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.11 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.12 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
 # =============================================================================
 # - 全部逻辑仅本文件；按分块改，避免动到已稳定模块
 # - SCAN / LOCK / FIRE 已调稳：默认冻结，除非联调明确要求
-# - 巡线相关只改：CONFIG 中 LINE_*、LINE VISION、LINE FOLLOW、tick_patrol
+# - 巡线相关：LINE_*、LINE VISION、LINE FOLLOW、tick_patrol、模式切换
+#
+# =============================================================================
+# 云台模式纪律（必须手工切换，否则 SCAN/射击会被跟随干扰）
+# =============================================================================
+#   PATROL 循线   → robot_mode_gimbal_follow（云台优先：转云台改行驶方向）
+#   SCAN / LOST_SCAN / LOCK / FIRE / RECOVER
+#                 → robot_mode_free（自由云台：独立 yaw/pitch，底盘不跟）
+# 规则：
+#   1) 进 SCAN / 射击相关态：必须 mode_ensure_free()（停底盘 + free）
+#   2) 重新巡线进 PATROL：先 free 摆低头姿态，再 mode_ensure_gimbal_lead()
+#   3) 禁止在 SCAN/LOCK/FIRE 里保持 gimbal_follow
 #
 # =============================================================================
 # 总览：状态机
 # =============================================================================
 #
-#   INIT ──boot──► PATROL
+#   INIT ──boot──► PATROL (gimbal_follow)
 #                    │
 #        ┌───────────┼───────────────┐
 #        │ 有人(3帧) │ 丢线/到时      │
 #        ▼          ▼               │
-#      LOCK ◄──── SCAN              │
+#      LOCK ◄──── SCAN              │  ← free
 #        │          │ 扫完有线        │
-#        │ 跟瞄+IR  │────────► PATROL│
+#        │ 跟瞄+IR  │────────► PATROL│  ← 再开 gimbal_follow
 #        ▼          │ 扫完无线        │
-#      FIRE         └───────► SCAN（完整两遍）
-#        │  连发2s → 等待3s → 连发2s …（人仍在）
-#        │ 确认丢人
+#      FIRE         └───────► SCAN
+#        │  free；脉冲射击
 #        ▼
-#    LOST_SCAN ── 快回中 → 完整两遍 SCAN
-#        │
+#    LOST_SCAN ── free 快回中 → 完整两遍 SCAN
 #        ▼
-#    RECOVER ──有线──► PATROL
-#        └─仍无线──► SCAN
+#    RECOVER (free) ──有线──► PATROL (gimbal_follow)
 #
 # =============================================================================
-# PATROL 巡线（v1.11：云台领导 / 底盘跟随云台）
+# PATROL 巡线（云台优先）
 # =============================================================================
-# 官方文档：
-#   - robot_mode_gimbal_follow = 云台优先：底盘跟随云台偏航
-#   - 线识别 get_line_detection_info：常见 len==42 且 info[2]>=1，info[19] 为线 x
-# 参考 DJI 实验室循线思路：
-#   - 低头看线；线偏中心时 gimbal.rotate_with_speed 纠偏
-#   - chassis 只前进（set_trans_speed + move(0)），转向交给「跟云台」
-# 离开 PATROL 时必须 set free + 停底盘，再进 SCAN/LOCK（不破坏已稳逻辑）
+#   - 线 info[19] 为 cx；err=cx-0.5 → gimbal.rotate_with_speed
+#   - chassis 只前进；无线则停，禁止盲目前进
 #
-# =============================================================================
-# SCAN / 射击（冻结摘要，见历史版本注释）
-# =============================================================================
-# - SCAN: [+180,0,-180,0] @120°/s，pitch +20
-# - FIRE: IR 一次 + 水弹脉冲 fire_once 2s / 等 3s
-#
+# SCAN: [+180,0,-180,0] @120°/s pitch+20 | FIRE: IR + 脉冲 2s/等 3s
 # =============================================================================
 
 # =============================================================================
@@ -166,6 +164,8 @@ g_scan_target_yaw = 0.0
 g_scan_last_yaw = 0.0
 g_scan_stuck = 0
 g_scan_seg_name = ""
+# 当前机器人模式标签（仅日志；实际以 set_mode 为准）
+g_mode_tag = "free"
 
 # =============================================================================
 # LOG / MATH
@@ -555,21 +555,23 @@ def log_heartbeat():
         age = 0.0
         if g_patrol_line_t0 > 0:
             age = t - g_patrol_line_t0
-        extra = " lineHit=%d miss=%d pHit=%d follow=%.1f pitch=%.0f cx=%.2f err=%.2f gyaw=%.0f n=%d" % (
-            g_line_hit, g_line_miss, g_person_hit, age, pit,
+        extra = " mode=%s lineHit=%d miss=%d follow=%.1f pitch=%.0f cx=%.2f err=%.2f gyaw=%.0f n=%d" % (
+            g_mode_tag, g_line_hit, g_line_miss, age, pit,
             g_line_cx, g_line_err, g_line_yaw_spd, g_line_info_len
         )
     elif g_state == STATE_SCAN or g_state == STATE_LOST_SCAN:
-        extra = " qi=%d/%d seg=%s tgt=%.0f yaw=%.0f pitch=%.0f pHit=%d person=%s" % (
-            g_scan_qi, len(g_scan_queue), g_scan_seg_name, g_scan_target_yaw,
+        extra = " mode=%s qi=%d/%d seg=%s tgt=%.0f yaw=%.0f pitch=%.0f pHit=%d person=%s" % (
+            g_mode_tag, g_scan_qi, len(g_scan_queue), g_scan_seg_name, g_scan_target_yaw,
             get_yaw(), pit, g_person_hit, str(has_p)
         )
     elif g_state == STATE_LOCK or g_state == STATE_FIRE:
-        extra = " person=%s miss=%d xy=(%.2f,%.2f) fphase=%d ir=%s shots=%d" % (
-            str(has_p), g_person_miss, px, py, g_fire_phase, str(g_ir_done), g_burst_shots
+        extra = " mode=%s person=%s miss=%d xy=(%.2f,%.2f) fphase=%d ir=%s shots=%d" % (
+            g_mode_tag, str(has_p), g_person_miss, px, py, g_fire_phase, str(g_ir_done), g_burst_shots
         )
     else:
-        extra = " lineHit=%d person=%s pitch=%.0f" % (g_line_hit, str(has_p), pit)
+        extra = " mode=%s lineHit=%d person=%s pitch=%.0f" % (
+            g_mode_tag, g_line_hit, str(has_p), pit
+        )
     log("HB" + extra)
 
 # =============================================================================
@@ -648,29 +650,47 @@ def set_gimbal_speed(spd):
         pass
 
 # =============================================================================
-# LINE FOLLOW（云台优先：底盘跟随云台偏航 + 前进）
-# 仅 PATROL 使用；离开 PATROL 必须 mode_free_halt()
+# ROBOT MODE（云台跟随 vs 自由云台）— 所有状态切换必须走这里
 # =============================================================================
-def mode_gimbal_lead():
+def mode_ensure_free(reason):
     """
-    云台优先 / 底盘跟随云台（rm_define.robot_mode_gimbal_follow）。
-    纠偏时只转云台 yaw，底盘自动跟转，从而改变行驶方向。
+    进 SCAN / LOST_SCAN / LOCK / FIRE / RECOVER 前调用。
+    停底盘 + 停云台速度 + robot_mode_free，避免「云台跟随」带着底盘乱动。
     """
-    robot_ctrl.set_mode(rm_define.robot_mode_gimbal_follow)
-    try:
-        chassis_ctrl.set_follow_gimbal_offset(0)
-    except Exception:
-        pass
-
-def mode_free_halt():
-    """离开巡线：停底盘/云台速度，切回 free（SCAN/LOCK 需要独立云台）。"""
+    global g_mode_tag
     chassis_halt()
     try:
         gimbal_ctrl.rotate_with_speed(0, 0)
     except Exception:
         pass
-    gimbal_stop()
+    try:
+        gimbal_ctrl.stop()
+    except Exception:
+        pass
     robot_ctrl.set_mode(rm_define.robot_mode_free)
+    g_mode_tag = "free"
+    log("MODE free | %s" % reason)
+
+def mode_ensure_gimbal_lead(reason):
+    """
+    仅 PATROL 循线使用：云台优先，底盘跟随云台偏航。
+    进 PATROL 时必须重新 set_mode（从 free 切回来），不能假设模式还在。
+    """
+    global g_mode_tag
+    robot_ctrl.set_mode(rm_define.robot_mode_gimbal_follow)
+    try:
+        chassis_ctrl.set_follow_gimbal_offset(0)
+    except Exception:
+        pass
+    g_mode_tag = "gimbal_lead"
+    log("MODE gimbal_lead | %s" % reason)
+
+# 兼容旧名
+def mode_free_halt():
+    mode_ensure_free("mode_free_halt")
+
+def mode_gimbal_lead():
+    mode_ensure_gimbal_lead("mode_gimbal_lead")
 
 def line_follow_step():
     """
@@ -884,11 +904,14 @@ def scan_load_segment(qi):
 
 def scan_start_full(reason):
     global g_scan_queue
+    # SCAN 全程 free，禁止云台跟随带着底盘转
+    mode_ensure_free("scan_start_full")
     g_scan_queue = scan_queue_full_two_rounds()
     person_hit_reset()
     # 扫前：必须上扬 + 尽量在中心起扫
     if abs(get_yaw()) > YAW_ARRIVE:
         gimbal_fast_home("scan_start_ensure_center", keep_scan_pitch=True)
+        mode_ensure_free("scan_after_home")
     else:
         gimbal_pose_scan_yaw0()
     if len(g_scan_queue) <= 0:
@@ -940,6 +963,11 @@ def scan_advance_or_finish():
 # STATE MACHINE
 # =============================================================================
 def set_state(s, reason):
+    """
+    状态入口。模式纪律（强制）：
+      - 目标态不是 PATROL → 一律 mode_ensure_free
+      - 目标态是 PATROL → free 摆姿后 mode_ensure_gimbal_lead
+    """
     global g_state, g_state_t0, g_no_person_t0, g_person_miss
     global g_patrol_line_t0, g_fire_count, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_have_last_person
@@ -952,14 +980,17 @@ def set_state(s, reason):
         g_person_miss = 0
     log("STATE %s -> %s | %s" % (state_name(old), state_name(s), reason))
 
-    # ----- PATROL：低头 + 云台优先循线 -----
+    # ----- 非 PATROL：必须先切 free，再做该态动作 -----
+    if s != STATE_PATROL:
+        fire_stop()
+        mode_ensure_free("enter_%s" % state_name(s))
+
+    # ----- PATROL：先 free 低头归中，再重新打开云台跟随 -----
     if s == STATE_PATROL:
         fire_stop()
-        mode_free_halt()
-        # 先 free 下摆好低头姿态，再切云台优先
+        mode_ensure_free("patrol_before_pose")
         gimbal_pose_line()
-        mode_gimbal_lead()
-        # 云台优先下再钉一次俯仰（只低头，航向由跟线控制）
+        mode_ensure_gimbal_lead("patrol_start")
         gimbal_set_pitch_line()
         fx_patrol()
         g_patrol_line_t0 = 0.0
@@ -970,29 +1001,27 @@ def set_state(s, reason):
         g_line_yaw_spd = 0.0
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
-        log("PATROL gimbal_lead line_spd=%.2f kp=%.0f" % (LINE_SPEED, LINE_GIMBAL_KP))
+        log("PATROL ready gimbal_lead line_spd=%.2f kp=%.0f" % (LINE_SPEED, LINE_GIMBAL_KP))
 
-    # ----- SCAN：完整两遍（冻结逻辑；进态前退出云台优先）-----
+    # ----- SCAN：free 下完整两遍 -----
     if s == STATE_SCAN:
-        fire_stop()
-        mode_free_halt()
+        # free 已在上方 ensure
         scan_start_full("normal_scan")
 
-    # ----- LOST_SCAN：快回中 + 完整两遍 -----
+    # ----- LOST_SCAN：free 快回中 + 完整两遍 -----
     if s == STATE_LOST_SCAN:
-        fire_stop()
-        mode_free_halt()
         pid_reset_aim()
         g_have_last_person = False
         fx_person_lost()
         time.sleep(0.2)
+        # home 期间保持 free
+        mode_ensure_free("lost_before_home")
         gimbal_fast_home("lost_before_rescan", keep_scan_pitch=True)
+        mode_ensure_free("lost_before_scan")
         scan_start_full("lost_rescan_full")
 
-    # ----- LOCK：发现音一次，停转跟瞄（free 模式）-----
+    # ----- LOCK：free 下跟瞄 -----
     if s == STATE_LOCK:
-        fire_stop()
-        mode_free_halt()
         gimbal_set_pitch_scan()
         pid_reset_aim()
         person_hit_reset()
@@ -1010,14 +1039,9 @@ def set_state(s, reason):
             g_have_last_person = True
         log("LOCK ok=%s xy=(%.2f,%.2f) hitNeed=%d" % (str(ok), x, y, PERSON_HIT_NEED))
 
-    # ----- FIRE：IR 已做则直接进入连发节奏 -----
+    # ----- FIRE：再次确认 free，再脉冲射击 -----
     if s == STATE_FIRE:
-        chassis_halt()
-        # 保持 free（从 LOCK 进入）；禁止云台优先干扰跟瞄
-        try:
-            robot_ctrl.set_mode(rm_define.robot_mode_free)
-        except Exception:
-            pass
+        mode_ensure_free("enter_FIRE")
         pid_reset_aim()
         if g_ir_done:
             g_fire_phase = FIRE_PHASE_IR_DONE
@@ -1031,27 +1055,24 @@ def set_state(s, reason):
             str(g_ir_done), T_BURST_ON, T_BURST_WAIT
         ))
 
-    # ----- RECOVER：低头找线（先 free，找到线再进 PATROL 开云台优先）-----
+    # ----- RECOVER：free 低头找线；回 PATROL 时再开 gimbal_lead -----
     if s == STATE_RECOVER:
-        fire_stop()
-        mode_free_halt()
         pid_reset_aim()
         gimbal_pose_line()
         fx_recover()
         g_line_hit = 0
         g_line_miss = 0
         person_hit_reset()
-        log("RECOVER find line pitch=%.0f" % get_pitch())
+        log("RECOVER find line pitch=%.0f mode=free" % get_pitch())
 
 def tick_patrol():
     """
-    PATROL（云台优先循线）:
-      连续 3 帧见人 → LOCK（先 mode_free）
-      稳定无蓝线 → SCAN
-      稳定有蓝线：线偏中心则转云台，底盘跟随并前进；满 T_MOVE → SCAN
+    PATROL（必须已是 gimbal_lead）:
+      见人 → LOCK（set_state 内切 free）
+      丢线 → SCAN（set_state 内切 free）
+      有线：转云台纠偏 + 底盘前进；满 T_MOVE → SCAN
     """
     global g_patrol_line_t0
-    # 保持低头（不强制 yaw=0，航向由线纠偏）
     try:
         if get_pitch() > (PITCH_LINE + 8):
             gimbal_set_pitch_line()
@@ -1065,7 +1086,6 @@ def tick_patrol():
     if line_stable_false():
         g_patrol_line_t0 = 0.0
         person_hit_reset()
-        mode_free_halt()
         set_state(STATE_SCAN, "no_line_stable")
         return
     if line_stable_true() == False:
@@ -1077,17 +1097,16 @@ def tick_patrol():
         return
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
-        # 开始跟线：确保云台优先 + 低头
-        mode_gimbal_lead()
+        # 开始跟线前再钉一次云台跟随（防止中途被改模式）
+        mode_ensure_gimbal_lead("patrol_follow_begin")
         gimbal_set_pitch_line()
-        log("PATROL line stable follow %.1fs pitch=%.0f cx=%.2f mode=gimbal_lead" % (
+        log("PATROL line stable follow %.1fs pitch=%.0f cx=%.2f" % (
             T_MOVE, get_pitch(), g_line_cx
         ))
     line_follow_step()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
         g_patrol_line_t0 = 0.0
         person_hit_reset()
-        mode_free_halt()
         set_state(STATE_SCAN, "follow_time_up")
 
 def tick_scan_common(is_lost):
@@ -1234,8 +1253,7 @@ def tick_recover():
 # =============================================================================
 def setup():
     log("setup begin")
-    robot_ctrl.set_mode(rm_define.robot_mode_free)
-    chassis_halt()
+    mode_ensure_free("setup")
     set_gimbal_speed(HOME_YAW_SPEED)
     gimbal_pose_line()
     time.sleep(0.15)
@@ -1251,14 +1269,14 @@ def setup():
     fx_patrol()
     pid_reset_aim()
     person_hit_reset()
-    log("setup done v1.11.0 scan=%.0f pitchLine=%d lineSpd=%.2f gKP=%.0f" % (
+    log("setup done v1.12.0 scan=%.0f pitchLine=%d lineSpd=%.2f gKP=%.0f" % (
         SCAN_YAW_SPEED, PITCH_LINE, LINE_SPEED, LINE_GIMBAL_KP
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.11.0 stamp=2026-08-04 12:57:12")
+    print("# LINE_GUARD_VERSION=1.12.0 stamp=2026-08-04 13:00:37")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
