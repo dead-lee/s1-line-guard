@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.19.0 stamp=2026-08-04 17:25:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.20.0 stamp=2026-08-04 17:35:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.19 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.20 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -54,20 +54,21 @@ PERSON_FIRE_MIN_H = 0.12
 PITCH_LINE = -20
 PITCH_SCAN = 20
 
-# --- SCAN（v1.19：绝对角 + 设定角速度，不用速度环蹭到位）---
-# 几何（从中心 0 起，文档 yaw 正≈右转/顺时针侧）：
-#   回中 → 顺时针 180 → 逆时针 180 回中 → 逆时针 180 → 顺时针 180 回中 → 回中
-# 绝对目标队列（每段 set_rotate_speed 后 yaw_ctrl(目标)）：
-#   [ +180, 0, -180, 0 ]
-# 若实车顺/逆与符号相反：对调 SCAN_CW / SCAN_CCW
+# --- SCAN（v1.20）---
+# 大段几何仍是：回中 → CW180 → 0 → CCW180 → 0
+# 段内用「小步绝对 yaw_ctrl」前进（默认每步 20°），每步后主循环可查人/LOCK/FIRE
+# （整段 yaw_ctrl(±180) 会阻塞，中途无法认人——与需求冲突）
+# 若顺/逆反了：对调 SCAN_CW / SCAN_CCW
 SCAN_CW = 180.0
 SCAN_CCW = -180.0
 SCAN_YAW_SPEED = 180.0
+# 每 tick 最多转这么多度（绝对角闭环一小步）
+SCAN_STEP_DEG = 20.0
 YAW_ARRIVE = 8.0
 SCAN_STUCK_FRAMES = 8
 HOME_YAW_SPEED = 360.0
 HOME_TIMEOUT_S = 3.0
-T_SCAN_MAX = 25.0
+T_SCAN_MAX = 30.0
 
 # --- PATROL 巡线（与官方 PID 示例一致）---
 LINE_SPEED = 0.30
@@ -982,10 +983,7 @@ def scan_seg_label(qi, target):
     return "qi%d_to_%+.0f" % (qi, target)
 
 def scan_yaw_abs(tgt, reason):
-    """
-    设定角速度后，绝对转到 tgt（度）。
-    使用官方 yaw_ctrl，由机内闭环完成，不靠速度×时间。
-    """
+    """设定角速度后，绝对转到 tgt（度）。机内闭环，不靠速度×时间估算。"""
     gimbal_stop()
     set_gimbal_speed(SCAN_YAW_SPEED)
     y0 = get_yaw()
@@ -994,9 +992,8 @@ def scan_yaw_abs(tgt, reason):
         gimbal_ctrl.yaw_ctrl(tgt)
     except Exception:
         log("SCAN yaw_ctrl FAIL tgt=%.0f" % tgt)
-    time.sleep(0.05)
+    time.sleep(0.02)
     gimbal_stop()
-    log("SCAN yaw_done tgt=%.0f now=%.0f" % (tgt, get_yaw()))
 
 def gimbal_fast_home(reason, keep_scan_pitch=False):
     """回中：同样用绝对角 + 设定速度。"""
@@ -1069,16 +1066,41 @@ def scan_start_full(reason):
 
 def scan_tick_turn():
     """
-    每调用一次：用 yaw_ctrl 把本段绝对目标转完（阻塞在机内闭环）。
-    段间由 tick_scan 查人；不再用 rotate_with_speed + 卡住帧数。
+    每调用一次：朝本段大目标走一小步绝对角（SCAN_STEP_DEG）。
+    返回 True = 本段大目标已到；False = 还要继续转（下一圈先查人再转）。
+    这样转动过程中每步都能 LOCK/瞄准/FIRE。
     """
     tgt = g_scan_target_yaw
     yaw0 = get_yaw()
-    if abs(tgt - yaw0) <= YAW_ARRIVE:
-        log("SCAN skip already at tgt=%.0f yaw=%.0f" % (tgt, yaw0))
+    err = tgt - yaw0
+    if abs(err) <= YAW_ARRIVE:
+        log("SCAN seg arrive yaw=%.0f tgt=%.0f | %s" % (yaw0, tgt, g_scan_seg_name))
         return True
-    scan_yaw_abs(tgt, g_scan_seg_name)
-    return True
+    # 本步目标：沿误差方向最多 SCAN_STEP_DEG
+    step = SCAN_STEP_DEG
+    if step < 5.0:
+        step = 5.0
+    if err > 0:
+        if err > step:
+            nxt = yaw0 + step
+        else:
+            nxt = tgt
+    else:
+        if err < -step:
+            nxt = yaw0 - step
+        else:
+            nxt = tgt
+    # 夹在硬件软限内
+    if nxt > 250.0:
+        nxt = 250.0
+    if nxt < -250.0:
+        nxt = -250.0
+    scan_yaw_abs(nxt, "%s step" % g_scan_seg_name)
+    yaw1 = get_yaw()
+    if abs(tgt - yaw1) <= YAW_ARRIVE:
+        log("SCAN seg arrive yaw=%.0f tgt=%.0f | %s" % (yaw1, tgt, g_scan_seg_name))
+        return True
+    return False
 
 def scan_advance_or_finish():
     global g_scan_qi
@@ -1473,14 +1495,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.19.0 T_MOVE=%.1f scan=CW/CCW180 yaw_ctrl spd=%.0f" % (
-        T_MOVE, SCAN_YAW_SPEED
+    log("setup done v1.20.0 T_MOVE=%.1f scan_step=%.0f spd=%.0f" % (
+        T_MOVE, SCAN_STEP_DEG, SCAN_YAW_SPEED
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.19.0 stamp=2026-08-04 17:25:00")
+    print("# LINE_GUARD_VERSION=1.20.0 stamp=2026-08-04 17:35:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
