@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.16.0 stamp=2026-08-04 16:49:57  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.16.1 stamp=2026-08-04 17:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.16 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.16.1 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -32,7 +32,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-T_MOVE = 3.0
+T_MOVE = 5.0
 T_CLEAR = 1.2
 PERSON_MISS_NEED = 12
 PERSON_HIT_NEED = 3
@@ -62,7 +62,7 @@ HOME_YAW_SPEED = 500.0
 HOME_TIMEOUT_S = 3.0
 
 # --- PATROL 巡线（与官方 PID 示例一致）---
-LINE_SPEED = 0.20
+LINE_SPEED = 0.30
 # 官方 pid.set_ctrl_params(330, 0, 28)
 LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
@@ -1381,14 +1381,12 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.16.0 patrol_no_person=%s fire=continuous T_MOVE=%.1f" % (
-        str(PERSON_LOCK_ON_PATROL == False), T_MOVE
-    ))
+    log("setup done v1.16.1 T_MOVE=%.1f line_spd=%.2f" % (T_MOVE, LINE_SPEED))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.16.0 stamp=2026-08-04 16:49:57")
+    print("# LINE_GUARD_VERSION=1.16.1 stamp=2026-08-04 17:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
