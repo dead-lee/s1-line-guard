@@ -1,6 +1,6 @@
-# LINE_GUARD_VERSION=1.15.0 stamp=2026-08-04 14:07:18  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.16.0 stamp=2026-08-04 16:49:57  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
-# S1 Line Guard v1.15 — 单文件粘贴进 App 实验室
+# S1 Line Guard v1.16 — 单文件粘贴进 App 实验室
 #
 # =============================================================================
 # 代码纪律（S1 单文件）
@@ -23,10 +23,10 @@
 # 我们之前用裸 list 下标，在 S1 上与 RmList 语义不一致 → 一直 pts=0。
 # SCAN/LOCK/FIRE 仍 robot_mode_free。
 #
-# v1.15 防死循环：
-#   - SCAN 无蓝线不得无限 rescan；最多 1 次后 RECOVER/PATROL
-#   - 射击结束优先 RECOVER 找线，并对行人检测冷却，避免操作者一直被锁
-#   - FIRE 最长时长 / 最多连射轮数后强制退出
+# v1.16（日志 16:47）：线上仍秒锁人开火
+#   原因：tick_patrol 先查人再查线；操作者在画面 → person hit=3 抢在 T_MOVE 前
+#   修复：PATROL 阶段不认人（只循线 T_MOVE 再 SCAN）；SCAN 才锁人
+#   射击：fire_continuous 非阻塞 + 主循环计时 stop（不连 fire_once）
 # =============================================================================
 
 # =============================================================================
@@ -36,17 +36,15 @@ T_MOVE = 3.0
 T_CLEAR = 1.2
 PERSON_MISS_NEED = 12
 PERSON_HIT_NEED = 3
-# SCAN 中认人更严（操作者常在画面里）
+# SCAN 中认人更严
 PERSON_HIT_NEED_SCAN = 6
+# PATROL 循线时不锁人（必须先走完 T_MOVE 再扫人）
+PERSON_LOCK_ON_PATROL = False
 LOOP_DT = 0.05
 LOG_HEARTBEAT_S = 1.0
-# 射击/丢目标后忽略行人秒数，便于回线
 T_PERSON_COOLDOWN = 12.0
-# 单次 FIRE 状态最长秒数（含等待）
 T_FIRE_MAX = 8.0
-# 一次 FIRE 最多几轮「2s 连射」
 FIRE_MAX_ROUNDS = 1
-# SCAN 连续「无蓝线再扫」次数上限
 SCAN_EMPTY_MAX = 1
 
 # 俯仰：巡线低头 / 扫描上扬（文档 pitch 范围约 -20~+35）
@@ -91,13 +89,11 @@ PERSON_MIN_H = 0.08
 
 # LOCK 跟瞄多久后红外示警 → FIRE
 T_AIM_BEFORE_IR = 1.2
-# 水弹：脉冲连击 2s，间隔 3s（人未离开才进入下一轮）
+# 水弹：非阻塞 fire_continuous 持续 T_BURST_ON，再 wait；主循环不卡在 fire_once
 T_BURST_ON = 2.0
 T_BURST_WAIT = 3.0
-# 官方 full-auto 约 1 发/s；脉冲 fire_once 约每 0.3s 一次更像连击
-# set_fire_count 文档范围 [1,8]；每脉冲 2 发，2s 内约 6~7 次脉冲
 FIRE_PULSE_INTERVAL = 0.30
-FIRE_BEADS_PER_PULSE = 2
+FIRE_BEADS_PER_PULSE = 1
 
 ENABLE_FIRE = True
 FORCE_NO_LINE = False
@@ -854,65 +850,51 @@ def fire_ir_warn_once():
 
 def fire_bead_burst_start():
     """
-    水弹「连击」窗口开始。
-    官方 fire_continuous 默认约 1 发/秒，不够连；此处改用脉冲 fire_once。
+    非阻塞连发：fire_continuous() 立即返回，主循环继续跟瞄/计时。
+    到 T_BURST_ON 后由 fire_bead_burst_stop() 停。
     """
-    global g_last_shot_t, g_burst_shots
+    global g_last_shot_t, g_burst_shots, g_fire_count
     if ENABLE_FIRE == False:
         log("BURST_ON skip ENABLE_FIRE=0")
         return
     fx_fire_burst_led()
-    g_last_shot_t = 0.0
-    g_burst_shots = 0
-    # 立刻打第一发，后续由 fire_bead_burst_tick 按间隔补发
-    fire_bead_pulse_once()
-    log("BURST_ON %.1fs pulse=%.2fs beads=%d" % (
-        T_BURST_ON, FIRE_PULSE_INTERVAL, FIRE_BEADS_PER_PULSE
-    ))
-
-def fire_bead_pulse_once():
-    """单次脉冲：set_fire_count + fire_once（文档 beads/time ∈ [1,8]）。"""
-    global g_last_shot_t, g_burst_shots, g_fire_count
-    if ENABLE_FIRE == False:
-        return
-    n = FIRE_BEADS_PER_PULSE
-    if n < 1:
-        n = 1
-    if n > 8:
-        n = 8
+    g_last_shot_t = now_s()
+    g_burst_shots = g_burst_shots + 1
+    g_fire_count = g_fire_count + 1
     try:
-        gun_ctrl.set_fire_count(n)
-        gun_ctrl.fire_once()
-        g_burst_shots = g_burst_shots + 1
-        g_fire_count = g_fire_count + 1
-        g_last_shot_t = now_s()
-        log("BURST pulse #%d beads=%d" % (g_burst_shots, n))
+        gun_ctrl.set_fire_count(FIRE_BEADS_PER_PULSE)
+        gun_ctrl.fire_continuous()
+        log("BURST_ON continuous %.1fs (non-block)" % T_BURST_ON)
     except Exception:
-        log("BURST pulse fail")
+        # 兜底单发（可能阻塞一小下）
+        try:
+            gun_ctrl.fire_once()
+            log("BURST_ON fallback fire_once")
+        except Exception:
+            log("BURST_ON FAIL")
 
 def fire_bead_burst_tick():
     """
-    连击窗口内周期调用：距上次脉冲 ≥ FIRE_PULSE_INTERVAL 再 fire_once。
-    当前帧看不到人且 miss 已升高 → 不射（避免对着空地/地面打）。
+    continuous 已在跑：主循环只检查「无人则提前 stop」，不调用阻塞 fire_once。
     """
     if ENABLE_FIRE == False:
         return
-    # 无人且已丢几帧：停脉冲（仍由 person_confirmed_lost 决定是否退出 FIRE）
     if people_seen() == False and g_person_miss >= 6:
-        return
-    if g_last_shot_t <= 0.0:
-        fire_bead_pulse_once()
-        return
-    if (now_s() - g_last_shot_t) >= FIRE_PULSE_INTERVAL:
-        fire_bead_pulse_once()
+        try:
+            gun_ctrl.stop()
+        except Exception:
+            pass
 
 def fire_bead_burst_stop():
-    gun_ctrl.stop()
+    try:
+        gun_ctrl.stop()
+    except Exception:
+        pass
     try:
         led_ctrl.gun_led_off()
     except Exception:
         pass
-    log("BURST_STOP shots=%d -> wait %.1fs" % (g_burst_shots, T_BURST_WAIT))
+    log("BURST_STOP (continuous off) round done")
 
 # =============================================================================
 # SCAN 核心：完整两遍 [ +180, 0, -180, 0 ]
@@ -1156,15 +1138,17 @@ def set_state(s, reason):
 
 def tick_patrol():
     """
-    PATROL = 官方循线 + 转移。
-    冷却期内不因行人进 LOCK。
+    PATROL = 官方循线 T_MOVE 秒，再 SCAN。
+    默认 PERSON_LOCK_ON_PATROL=False：巡线阶段不认人，避免操作者秒锁开火。
     """
     global g_patrol_line_t0, g_scan_empty_count
     line_update()
-    if person_hit_update(PERSON_HIT_NEED):
-        log("PATROL person hit=%d -> LOCK" % g_person_hit)
-        set_state(STATE_LOCK, "person_on_patrol")
-        return
+    # 先保证线：只在明确允许时才锁人
+    if PERSON_LOCK_ON_PATROL:
+        if person_hit_update(PERSON_HIT_NEED):
+            log("PATROL person hit=%d -> LOCK" % g_person_hit)
+            set_state(STATE_LOCK, "person_on_patrol")
+            return
     if line_stable_false():
         if g_line_ever_ok:
             g_patrol_line_t0 = 0.0
@@ -1397,14 +1381,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.15.0 anti-loop cooldown=%.0fs fire_max=%.0fs" % (
-        T_PERSON_COOLDOWN, T_FIRE_MAX
+    log("setup done v1.16.0 patrol_no_person=%s fire=continuous T_MOVE=%.1f" % (
+        str(PERSON_LOCK_ON_PATROL == False), T_MOVE
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.15.0 stamp=2026-08-04 14:07:18")
+    print("# LINE_GUARD_VERSION=1.16.0 stamp=2026-08-04 16:49:57")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
