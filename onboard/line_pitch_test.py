@@ -1,118 +1,140 @@
-# LINE_PITCH_TEST_VERSION=1.0.0 stamp=2026-08-04 13:25:00
+# LINE_PITCH_TEST_VERSION=1.1.0 stamp=2026-08-04 13:35:00
 # -*- coding: utf-8 -*-
-# S1 蓝线识别 × 云台俯仰 测试（单文件粘贴进 App 实验室）
+# S1 蓝线识别 × 云台俯仰 诊断测试（单文件粘贴进 App 实验室）
 #
-# 用途：
-#   车身压在蓝线上，测试不同「下压」俯仰角能否稳定看到线。
-#   在控制台打印每个角度的识别结果，并推荐「下压尽量多、且眼前能看到线」的角度。
+# 用途：车压蓝线，扫不同俯仰；打印「原始 API 数据 + 解析结果」
+# 判断是「算法真没看见线」还是「我们解析下标错了」。
 #
-# 使用：
-#   1) 车压蓝线 / 线在车头正前方地面
-#   2) 全选本文件 → App 实验室 Python → 运行
-#   3) 看控制台每档 pitch 的 hit/pts/cx；结束有推荐角度
+# 官方实验室示例（DJI）：
+#   vision.enable_detection(line)
+#   vision.line_follow_color_set(blue)
+#   LineList = RmList(get_line_detection_info())
+#   len==42 且 LineList[2]>=1 → 有线，x=LineList[19]
 #
-# 俯仰范围（S1 文档约 -20~+35）：数值越小越低头看地。
+# 说明：电工胶带蓝偏深，白瓷砖反光强时，S1 常检不出（pts=0）。
+# 18mm 宽度在推荐 15~25mm 内，宽度一般不是主因。
 
 # =============================================================================
 # CONFIG
 # =============================================================================
-# 待测俯仰（度）：从略平视 → 尽量低头（-20 为硬件下限附近）
-# 顺序：先浅后深，最后再汇总「越负越好」的推荐
-PITCH_LIST = [10, 5, 0, -5, -10, -12, -15, -17, -18, -19, -20]
-
-# 每个角度：到位等待 + 采样帧数
-SETTLE_S = 0.45
-SAMPLES = 20
+PITCH_LIST = [5, 0, -5, -10, -15, -18, -20]
+SETTLE_S = 0.5
+SAMPLES = 12
 SAMPLE_DT = 0.05
-
-# 判定「能看见线」：采样中成功帧比例
-HIT_OK_RATIO = 0.40
-# 推荐：在 hit 达标中选 pitch 最小（下压最多）的一档
-# 颜色
-LINE_COLOR_BLUE = True
+HIT_OK_RATIO = 0.35
+# 每个俯仰再试三种曝光（文档：large/medium/small）
+EXPOSURE_NAMES = ["medium", "small", "large"]
 
 # =============================================================================
-# LINE PARSE（与 line_guard 一致：官方 len/点数/[19]）
+# 原始数据 / 解析
 # =============================================================================
-def line_parse(info):
-    """返回 (ok, cx, n, pts)。"""
+def exp_set(name):
+    if name == "large":
+        media_ctrl.exposure_value_update(rm_define.exposure_value_large)
+    elif name == "small":
+        media_ctrl.exposure_value_update(rm_define.exposure_value_small)
+    else:
+        media_ctrl.exposure_value_update(rm_define.exposure_value_medium)
+
+def get_info_raw_list():
+    """取线识别原始列表；优先包成 RmList（与官方示例一致）。"""
+    raw = vision_ctrl.get_line_detection_info()
     try:
-        n = len(info)
+        return RmList(raw)
     except Exception:
-        return False, 0.5, 0, 0
+        return raw
+
+def list_len(info):
+    try:
+        return len(info)
+    except Exception:
+        return -1
+
+def list_get(info, idx):
+    try:
+        return info[idx]
+    except Exception:
+        return None
+
+def dump_raw(info, tag):
+    """打印关键下标，便于对照官方 [2]=点数 [19]=x。"""
+    n = list_len(info)
+    a0 = list_get(info, 0)
+    a1 = list_get(info, 1)
+    a2 = list_get(info, 2)
+    a3 = list_get(info, 3)
+    a18 = list_get(info, 18)
+    a19 = list_get(info, 19)
+    a20 = list_get(info, 20)
+    print(
+        "[LPT] %s RAW n=%s [0]=%s [1]=%s [2]=%s [3]=%s [18]=%s [19]=%s [20]=%s"
+        % (tag, str(n), str(a0), str(a1), str(a2), str(a3), str(a18), str(a19), str(a20))
+    )
+
+def parse_official(info):
+    """
+    严格按官方：len==42 且 [2]>=1，cx=[19]。
+    返回 (ok, cx, n, pts, note)
+    """
+    n = list_len(info)
     pts = 0
     try:
-        if n > 2 and info[2] is not None:
-            pts = int(info[2])
+        v2 = list_get(info, 2)
+        if v2 is not None:
+            pts = int(v2)
     except Exception:
         pts = 0
+    # 官方判断
+    if n == 42 and pts >= 1:
+        try:
+            cx = float(list_get(info, 19))
+            return True, cx, n, pts, "official_42"
+        except Exception:
+            return False, 0.5, n, pts, "official_42_no_cx"
+    # 放宽：n>=42
     if n >= 42 and pts >= 1:
         try:
-            cx = float(info[19])
-            if cx >= 0.0 and cx <= 1.0:
-                return True, cx, n, pts
+            cx = float(list_get(info, 19))
+            return True, cx, n, pts, "n>=42"
         except Exception:
-            pass
-        for idx in (18, 20, 17, 21, 3, 5):
-            try:
-                if n > idx:
-                    cx = float(info[idx])
-                    if cx >= 0.0 and cx <= 1.0:
-                        return True, cx, n, pts
-            except Exception:
-                pass
-    if n > 19 and pts >= 1:
+            return False, 0.5, n, pts, "n>=42_no_cx"
+    # 兼容：有的固件 n 不是 42 但 [2]>=1
+    if pts >= 1 and n > 19:
         try:
-            cx = float(info[19])
-            if cx >= 0.0 and cx <= 1.0:
-                return True, cx, n, pts
+            cx = float(list_get(info, 19))
+            return True, cx, n, pts, "pts_and_19"
         except Exception:
             pass
-    return False, 0.5, n, pts
+    return False, 0.5, n, pts, "no_line"
 
-def sample_line_at_pitch(pitch_deg):
-    """
-    固定俯仰采样 SAMPLES 帧。
-    返回 dict: hits, n_avg, pts_avg, cx_avg, ok_ratio
-    """
+def sample_once(pitch_cmd, exp_name):
     hits = 0
-    n_sum = 0
-    pts_sum = 0
-    cx_sum = 0.0
-    cx_n = 0
+    last_note = ""
+    last_n = 0
+    last_pts = 0
+    last_cx = 0.5
+    dumped = False
     i = 0
     while i < SAMPLES:
-        info = vision_ctrl.get_line_detection_info()
-        ok, cx, n, pts = line_parse(info)
-        n_sum = n_sum + n
-        pts_sum = pts_sum + pts
+        info = get_info_raw_list()
+        if dumped == False:
+            dump_raw(info, "pitch=%d exp=%s" % (pitch_cmd, exp_name))
+            dumped = True
+        ok, cx, n, pts, note = parse_official(info)
+        last_note = note
+        last_n = n
+        last_pts = pts
+        last_cx = cx
         if ok:
             hits = hits + 1
-            cx_sum = cx_sum + cx
-            cx_n = cx_n + 1
         time.sleep(SAMPLE_DT)
         i = i + 1
     ratio = 0.0
     if SAMPLES > 0:
         ratio = (1.0 * hits) / SAMPLES
-    n_avg = 0.0
-    pts_avg = 0.0
-    cx_avg = 0.5
-    if SAMPLES > 0:
-        n_avg = (1.0 * n_sum) / SAMPLES
-        pts_avg = (1.0 * pts_sum) / SAMPLES
-    if cx_n > 0:
-        cx_avg = cx_sum / cx_n
-    return {
-        "hits": hits,
-        "ratio": ratio,
-        "n_avg": n_avg,
-        "pts_avg": pts_avg,
-        "cx_avg": cx_avg,
-    }
+    return hits, ratio, last_n, last_pts, last_cx, last_note
 
 def leds_show(ok):
-    """绿=本档看见线，红=看不见。"""
     if ok:
         led_ctrl.set_bottom_led(rm_define.armor_bottom_all, 0, 255, 0, rm_define.effect_always_on)
         led_ctrl.set_top_led(rm_define.armor_top_all, 0, 255, 0, rm_define.effect_always_on)
@@ -121,9 +143,10 @@ def leds_show(ok):
         led_ctrl.set_top_led(rm_define.armor_top_all, 255, 0, 0, rm_define.effect_always_on)
 
 def start():
-    print("======== Line Pitch Test start ========")
-    print("# LINE_PITCH_TEST_VERSION=1.0.0 stamp=2026-08-04 13:25:00")
-    print("[LPT] free mode, blue line, yaw=0, sweep pitch down")
+    print("======== Line Pitch Test v1.1 ========")
+    print("# LINE_PITCH_TEST_VERSION=1.1.0 stamp=2026-08-04 13:35:00")
+    print("[LPT] blue electrical tape? white tile? width~18mm")
+    print("[LPT] API: enable_detection(line)+line_follow_color_blue + get_line_detection_info")
     robot_ctrl.set_mode(rm_define.robot_mode_free)
     chassis_ctrl.stop()
     try:
@@ -131,76 +154,79 @@ def start():
     except Exception:
         pass
     vision_ctrl.enable_detection(rm_define.vision_detection_line)
-    if LINE_COLOR_BLUE:
-        vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-    media_ctrl.exposure_value_update(rm_define.exposure_value_medium)
-
-    # 航向归中，只改俯仰
+    vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
     try:
         gimbal_ctrl.yaw_ctrl(0)
     except Exception:
         pass
-    time.sleep(0.3)
+    time.sleep(0.4)
 
-    results = []
-    i = 0
-    while i < len(PITCH_LIST):
-        p = PITCH_LIST[i]
-        print("[LPT] --- pitch=%d deg ---" % p)
+    any_ok = False
+    best_p = None
+    best_ratio = 0.0
+    pi = 0
+    while pi < len(PITCH_LIST):
+        p = PITCH_LIST[pi]
         try:
             gimbal_ctrl.pitch_ctrl(p)
         except Exception:
             print("[LPT] pitch_ctrl(%d) FAIL" % p)
-            i = i + 1
+            pi = pi + 1
             continue
         time.sleep(SETTLE_S)
         try:
             actual = gimbal_ctrl.get_axis_angle(rm_define.gimbal_axis_pitch)
         except Exception:
-            actual = p
-        r = sample_line_at_pitch(p)
-        ok = r["ratio"] >= HIT_OK_RATIO
-        leds_show(ok)
-        print(
-            "[LPT] pitch_cmd=%d actual=%.1f hits=%d/%d ratio=%.2f pts=%.1f n=%.1f cx=%.2f %s"
-            % (
-                p,
-                actual,
-                r["hits"],
-                SAMPLES,
-                r["ratio"],
-                r["pts_avg"],
-                r["n_avg"],
-                r["cx_avg"],
-                "SEE_LINE" if ok else "NO_LINE",
-            )
-        )
-        results.append((p, r, ok, actual))
-        time.sleep(0.2)
-        i = i + 1
+            actual = p * 1.0
 
-    # 汇总：能看见线的里面，选下压最多（pitch 最小）
-    print("[LPT] ======== SUMMARY ========")
-    best_p = None
-    best_ratio = 0.0
-    j = 0
-    while j < len(results):
-        p, r, ok, actual = results[j]
-        tag = "OK" if ok else "--"
-        print(
-            "[LPT] sum pitch=%d actual=%.1f ratio=%.2f pts=%.1f %s"
-            % (p, actual, r["ratio"], r["pts_avg"], tag)
-        )
-        if ok:
-            if best_p is None or p < best_p:
+        ei = 0
+        pitch_best_ratio = 0.0
+        pitch_ok = False
+        while ei < len(EXPOSURE_NAMES):
+            en = EXPOSURE_NAMES[ei]
+            exp_set(en)
+            time.sleep(0.2)
+            hits, ratio, n, pts, cx, note = sample_once(p, en)
+            see = ratio >= HIT_OK_RATIO
+            if see:
+                pitch_ok = True
+                any_ok = True
+            if ratio > pitch_best_ratio:
+                pitch_best_ratio = ratio
+            if see and (best_p is None or p < best_p):
                 best_p = p
-                best_ratio = r["ratio"]
-        j = j + 1
+                best_ratio = ratio
+            print(
+                "[LPT] pitch_cmd=%d actual=%.1f exp=%s hits=%d/%d ratio=%.2f n=%d pts=%d cx=%.2f note=%s %s"
+                % (
+                    p,
+                    actual,
+                    en,
+                    hits,
+                    SAMPLES,
+                    ratio,
+                    n,
+                    pts,
+                    cx,
+                    note,
+                    "SEE_LINE" if see else "NO_LINE",
+                )
+            )
+            ei = ei + 1
 
-    if best_p is None:
-        print("[LPT] RECOMMEND: NONE — 所有角度都看不到线")
-        print("[LPT] 检查：蓝胶带/颜色/曝光/是否在画面中/是否 enable line")
-        # 红闪提示失败
+        leds_show(pitch_ok)
+        print(
+            "[LPT] pitch=%d best_ratio=%.2f %s"
+            % (p, pitch_best_ratio, "SEE" if pitch_ok else "NO")
+        )
+        pi = pi + 1
+
+    print("[LPT] ======== SUMMARY ========")
+    if any_ok == False:
+        print("[LPT] RECOMMEND: NONE")
+        print("[LPT] 结论：API 在返回列表(常见 n=42)，但 pts=0 → 视觉算法未检出蓝线")
+        print("[LPT] 函数用法与官方一致；更可能是胶带颜色/反光/画面里没有「S1 认定的蓝」")
+        print("[LPT] 建议：换更鲜艳的蓝标识胶带；减反光；App 里用图形块「识别到线」交叉验证")
         led_ctrl.set_bottom_led(rm_define.armor_bottom_all, 255, 0, 0, rm_define.effect_flash)
         led_ctrl.set_top_led(rm_define.armor_top_all, 255, 0, 0, rm_define.effect_flash)
         try:
@@ -209,15 +235,12 @@ def start():
             pass
     else:
         print(
-            "[LPT] RECOMMEND pitch=%d (most downward among SEE_LINE, ratio=%.2f)"
+            "[LPT] RECOMMEND pitch=%d ratio=%.2f (most downward among SEE)"
             % (best_p, best_ratio)
         )
-        print("[LPT] 可把 line_guard 的 PITCH_LINE 改成 %d 再测巡线" % best_p)
-        # 停在推荐角度，绿灯
         try:
             gimbal_ctrl.pitch_ctrl(best_p)
         except Exception:
             pass
         leds_show(True)
-
     print("======== Line Pitch Test done ========")
