@@ -40,8 +40,7 @@
 
 - `yaw_ctrl` / `pitch_ctrl` / `angle_ctrl` / `rotate_with_degree`：执行块，**到位后返回**；勿再叠 sleep「等硬件」。  
 - `rotate_with_speed`：速度环，需自行 `stop`。  
-- `fire_once`：阻塞（本项目射击用脉冲 `fire_once`）。  
-- `fire_continuous`：非阻塞（line_guard **未使用**）。
+- `fire_once`：阻塞；本项目射击为脉冲 `fire_once`。
 
 ### 线 / 人
 

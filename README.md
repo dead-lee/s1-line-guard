@@ -21,12 +21,12 @@
 
 S1 沿地面 **蓝色** 色带巡逻；定时停车扫视是否有人。发现行人后：
 
-1. **立即 FIRE**：边瞄准边射击（不经「只瞄不射」的 LOCK）  
+1. **立即 FIRE**：边瞄准边射击  
 2. 节奏：**射约 3 s** → **停火只瞄约 3 s** → 再射 …  
 3. 首段 3 s 射击完成前不因 miss 放弃；之后连续 miss 超过门槛 → 停火，整圈 SCAN  
 4. 无线：底盘停，**反复完整 SCAN**；有线再回 PATROL  
 
-一句话：**沿线巡逻 → 停车扫人 → 发现即交战 → 人/线丢失后按规格回扫或巡线。**
+一句话：**沿线巡逻 → 停车扫人 → 发现即交战 → 按规格回扫或巡线。**
 
 自定义警告 mp3（`resources/`）为素材；车载默认用 **内置音效 + 灯色**（App 未必能播自定义文件）。
 
@@ -55,7 +55,7 @@ PATROL ──T_MOVE 贴线满──► SCAN
 | **SCAN** | 停车；规划 yaw 步进扫视；步间查人 |
 | **FIRE** | 立即边瞄边射；SHOOT/HOLD 交替 |
 
-无 LOCK / RECOVER / LOST_SCAN 状态（细节见 `behavior-spec.md`）。
+细则见 [`docs/behavior-spec.md`](docs/behavior-spec.md)。
 
 ### 主要可调参数（`line_guard.py` CONFIG）
 
@@ -102,7 +102,7 @@ s1-line-guard/
 │   ├── line_guard.py      # ★ 正式哨兵（粘贴此文件）
 │   ├── README.md
 │   ├── line_pitch_test.py / person_detect_test.py / led_color_test.py
-│   └── wheel_clean.py
+│   └── wheel_clean.py     # 麦轮清洁（独立工具）
 ├── resources/             # 警告音素材（非车载必需）
 ├── logs/                  # 本地调试截图（一般不入库）
 └── scripts/
@@ -126,18 +126,6 @@ s1-line-guard/
 
 ---
 
-## 6. 实现状态
-
-| 项 | 状态 |
-|----|------|
-| 单文件 `line_guard.py`（PATROL / SCAN / FIRE） | **在用**（以 VERSION 为准） |
-| 规格纪律 `behavior-spec` + `AGENTS` | **在用** |
-| 辅助测试脚本（灯 / 线 / 人 / 麦轮） | 按需粘贴 |
-
-详细条文只维护 **`docs/behavior-spec.md`**，勿以本文旧段落为准。
-
----
-
-## 7. 许可
+## 6. 许可
 
 见 [LICENSE](./LICENSE)（MIT）。与 DJI / RoboMaster 商标及官方条款无关。

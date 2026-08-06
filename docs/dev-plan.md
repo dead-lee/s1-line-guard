@@ -1,16 +1,15 @@
-# 开发计划 / 现状摘要
+# 联调与交付
 
-**行为以 [`behavior-spec.md`](./behavior-spec.md) 为准；实现以 `onboard/line_guard.py` 文件头 `LINE_GUARD_VERSION` 为准。**  
-本文只记里程碑与联调顺序，**不另立状态机**。
+**行为以 [`behavior-spec.md`](./behavior-spec.md) 为准；实现以 `onboard/line_guard.py` 首行 `LINE_GUARD_VERSION` 为准。**
 
 ---
 
-## 当前交付（已落地）
+## 交付内容
 
 | 能力 | 说明 |
 |------|------|
 | 单文件车载 | `onboard/line_guard.py` 粘贴进 App 实验室 |
-| 状态 | **PATROL ⇄ SCAN → FIRE**（无 LOCK / RECOVER / LOST_SCAN） |
+| 状态 | **PATROL ⇄ SCAN → FIRE** |
 | 巡线 | 蓝线 + `chassis_follow`；弯道减速；近/中/远点融合控向 |
 | 扫描 | 规划角步进约 45°；每角最多 5 次查人；hit≥3 → 立即 FIRE |
 | 交战 | 边瞄边射 3s / 停火只瞄 3s；首段 3s 内不因 miss 放弃 |
@@ -19,7 +18,7 @@
 
 ---
 
-## 建议联调顺序
+## 联调顺序
 
 1. **灯 / API**：`led_color_test.py`  
 2. **线**：`line_pitch_test.py`（确认 RmList、俯仰可见线）  
@@ -32,19 +31,7 @@
 
 ---
 
-## 历史里程碑（已完成或已废弃目标，仅备查）
-
-| 代号 | 原目标 | 现状 |
-|------|--------|------|
-| M0 | 需求与骨架、彩灯 | 完成；语音本期不做 |
-| M1–M2 | 单文件 + 巡线 + 扫描 | **已并入 line_guard** |
-| 旧 M3「LOCK 只瞄」 | 发现后只瞄不射 | **已取消**；改为立即 FIRE |
-| 旧 M4「满 3s 再 1s 点射」 | 先警告再间隔点射 | **已改为** 射 3s / 停瞄 3s 脉冲 |
-| 旧 M5「RECOVER 状态」 | 独立找线态 | **已取消**；无线用反复 SCAN |
-
----
-
-## 明确不做（除非改 behavior-spec）
+## 范围外（除非改 behavior-spec）
 
 - 自定义 mp3 依赖、Mac 实时图传闭环  
 - 黑线巡线、PC SDK  
