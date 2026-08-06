@@ -20,15 +20,28 @@
 |------|--------|----------|
 | `docs/behavior-spec.md` | 已定行为（短、可对照） | 历史吐槽、API 长文、灯光细节 |
 | `docs/design-notes.md` | API 坑、灯光含义、实现备忘 | 另立一套状态机 |
+| `docs/dev-plan.md` | 现状 / 联调顺序 / 已废弃目标备查 | 与代码矛盾的「待实现 LOCK」等 |
+| `README.md`、`onboard/README.md` | 与代码一致的用法与状态机摘要 | 过期参数表、已删状态 |
 | `onboard/line_guard.py` 头注释 | 指向 behavior-spec + 极短摘要 | 与规格矛盾的旧流程 |
+
+## 文档与代码必须一致（主动维护）
+
+1. **改行为或删状态/参数时**：同一任务内同步  
+   `behavior-spec.md`、`README.md`、`onboard/README.md`、`design-notes.md`、`dev-plan.md` 中所有相关描述。  
+2. **不要**等用户逐条指出「文档还写着 LOCK」；实现已变则文档立刻改掉。  
+3. 仓库内 **禁止** 残留与现行状态机矛盾的「主路径」说明（历史仅可放在 dev-plan「已废弃」表）。  
+4. `config.py` / `main.py` 等占位文件不得继续写已废弃参数当真相源。
 
 ## 改代码检查（每次）
 
 - [ ] 本次 diff 中每个新常量/分支是否在 `behavior-spec.md` 有对应条文？  
 - [ ] 是否出现规格未要求的「保护性」超时/冷却/计数上限？有则删除或先问用户。  
-- [ ] CONFIG 注释与规格用词一致（hit≥3、射3s/停3s 等）。
+- [ ] CONFIG 注释与规格用词一致（hit≥3、射3s/停3s 等）。  
+- [ ] README / design-notes / dev-plan / onboard README 是否已与本次行为一致？  
 
 ## 其它
 
 - 用户说「不要动代码」则只分析/改文档（若其要求改文档）。  
 - 用户说「提交」：按全局 Git 约定 commit + push。  
+- 用户说「该改就改 / 不要历史包袱」：删死代码与过期文档，不必保留兼容层。  
+

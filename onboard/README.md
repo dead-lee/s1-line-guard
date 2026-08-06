@@ -1,61 +1,40 @@
 # onboard — 车载代码（App 实验室）
 
-此目录中的 Python 用于粘贴到 **RoboMaster App → 实验室 → Python** 运行。
+此目录 Python 用于粘贴到 **RoboMaster App → 实验室 → Python**。
 
-## 平台限制（重要）
+## 平台限制
 
-因 App 实验室限制，**可运行程序按「单一文件」交付**：
-
-- 整份逻辑放在 **一个 `.py` 文件**里，一次全选粘贴进 App。
-- **不要**依赖 `import` 项目内其他本地模块（App 侧通常无法多文件工程）。
-- 单文件内用清晰分块组织代码，例如：
-
-```text
-# ===== 可调参数 =====
-# ===== 工具函数 / 灯效 / 巡线 / 扫描 =====
-# ===== 状态机 =====
-# ===== start() 入口 =====
-```
-
-- 仅使用车载官方 API（`led_ctrl` / `chassis_ctrl` / `vision_ctrl` / `rm_define` / `time` 等）。
-- **禁止**：`numpy`、`cv2`、`pip` 包、以 `threading` 为主的并发。
-
-Mac 仓库可继续用多文件做草稿，**上车前合并为单文件**。
+- **单文件交付**：整份逻辑在一个 `.py` 里全选粘贴。  
+- **不要** `import` 本仓库其它本地模块。  
+- 仅用官方车载 API；禁止 `numpy` / `cv2` / pip / 以 `threading` 为主的并发。
 
 ## 文件
 
 | 文件 | 说明 |
-|---|---|
-| **`line_guard.py`** | **正式哨兵程序**（单文件，粘贴运行） |
-| `line_pitch_test.py` | 蓝线识别 / 俯仰 / 返回值 dump |
-| `person_detect_test.py` | **行人识别**测试：有人绿灯+音，无人红灯 |
-| `led_color_test.py` | 彩灯测试（验证 App 环境） |
-| `config.py` / `main.py` | 早期占位，可忽略 |
+|------|------|
+| **`line_guard.py`** | **正式哨兵**（粘贴运行；看首行 `LINE_GUARD_VERSION`） |
+| `line_pitch_test.py` | 蓝线识别 / 俯仰 / RmList dump |
+| `person_detect_test.py` | 行人识别灯效测试 |
+| `led_color_test.py` | 彩灯测试 |
+| `wheel_clean.py` | 麦轮清洁（慢速转轮） |
+| `main.py` | 仅说明占位，**不可运行** |
+| `config.py` | **废弃**，参数以 `line_guard.py` CONFIG 为准 |
 
-## 运行 `line_guard.py`（v1）
+行为权威：[`../docs/behavior-spec.md`](../docs/behavior-spec.md)。
 
-1. DIY → **Python** → 全选粘贴 `line_guard.py`  
-2. 蓝胶带单环（可选：`ENABLE_LINE = False` 先测扫描/锁定）  
-3. 连接 S1 运行  
-4. 默认 `ENABLE_FIRE = True`（无弹也可测开火逻辑）  
-5. 对准使用 **软件 PID** 驱动云台 yaw/pitch  
+## 运行 `line_guard.py`
 
-反馈时请说明：状态行为、报错原文、需要调的参数（PID / 俯仰 / 时间）。
+1. 确认首行 VERSION stamp 为仓库最新  
+2. 全选复制 → App → 实验室 → Python → 粘贴运行  
+3. 蓝胶带单环；状态：**PATROL → SCAN →（hit≥3）FIRE**  
+4. 联调可先 `ENABLE_FIRE = False`  
+5. 反馈时附：VERSION、状态日志、报错原文、要调的参数  
 
-## 如何运行 `led_color_test.py`
+## 运行测试脚本
 
-1. 用可用的 RoboMaster App 连接 S1（直连 Wi‑Fi）。  
-2. 打开本文件，**全选复制**。  
-3. App → **实验室** → **Python** → 粘贴（覆盖原内容）。  
-4. 运行。预期：底盘+云台灯按红橙黄绿青蓝紫白轮换，再红呼吸、红闪，最后熄灭。  
-5. 若某步报错：把 **完整报错原文** 记下来（便于对照枚举名差异）。
+任选一个测试文件，同样「全选粘贴」运行。`led_color_test` 预期：底盘+云台灯色轮换后熄灭。
 
 ## 安全
 
-测灯时无需发射器；车静止放置即可。
-
-## `wheel_clean.py` — 麦轮原地清洁
-
-- 四轮按抵消组合旋转约 60 秒，便于刷洗；车身尽量不动。
-- 可设为自定义技能 / 自主程序，用 App 图标或车身按键触发。
-- 粘贴前看文件首行 `WHEEL_CLEAN_VERSION` / `stamp=`。
+- 测灯 / 测线可不装弹；开火测试注意弹道与急停。  
+- 水弹在俯仰过高时可能被机内禁止。  

@@ -2,236 +2,142 @@
 
 基于 **DJI RoboMaster S1** 官方 App 实验室（车载 Python）的沿线巡逻卫兵程序。
 
-- **Mac / 本仓库**：维护需求、车载兼容代码与资源  
-- **S1 上**：粘贴 `onboard/` 程序后全自动运行  
+- **Mac / 本仓库**：维护规格、车载单文件与调试资源  
+- **S1 上**：粘贴 `onboard/line_guard.py` 后全自动运行  
 - **不需要** Mac 与 S1 实时传数据；功能闭环全部在车上完成  
 
-> **行为规格（改代码必读）：** [`docs/behavior-spec.md`](docs/behavior-spec.md)  
-> **助手纪律：** [`AGENTS.md`](AGENTS.md)（规格未写禁止加进代码）  
-> 实现备忘 / 灯光含义：[`docs/design-notes.md`](docs/design-notes.md)  
-> 车载程序：`onboard/line_guard.py`
+| 文档 | 用途 |
+|------|------|
+| **[`docs/behavior-spec.md`](docs/behavior-spec.md)** | **行为唯一权威**（改代码必读） |
+| [`AGENTS.md`](AGENTS.md) | 助手纪律：规格未写禁止进代码；**文档须与代码一致** |
+| [`docs/design-notes.md`](docs/design-notes.md) | 灯光含义、API 坑、实现备忘 |
+| `onboard/line_guard.py` | **正式车载程序**（看文件首行 `LINE_GUARD_VERSION`） |
 
 仓库：<https://github.com/dead-lee/s1-line-guard>
 
 ---
 
-## 1. 项目目标
+## 1. 做什么
 
-S1 沿地面 **蓝色** 色带巡逻；在定时哨位抬头扫描是否有人。若识别到行人：
+S1 沿地面 **蓝色** 色带巡逻；定时停车扫视是否有人。发现行人后：
 
-1. 枪口（云台）指向人员  
-2. **红色灯光闪烁**  
-3. 播放警告（见 `resources/warning_intruder.mp3`）  
-4. 人员若持续存在超过 **3 秒**，之后 **每隔 1 秒点射一次** 示警  
-5. 人员离开视野后，停止射击与告警，恢复巡线巡逻  
+1. **立即 FIRE**：边瞄准边射击（不经「只瞄不射」的 LOCK）  
+2. 节奏：**射约 3 s** → **停火只瞄约 3 s** → 再射 …  
+3. 首段 3 s 射击完成前不因 miss 放弃；之后连续 miss 超过门槛 → 停火，整圈 SCAN  
+4. 无线：底盘停，**反复完整 SCAN**；有线再回 PATROL  
 
-一句话：**沿线巡逻的卫兵，哨位扫视；发现入侵则警告，超时点射，人走归队。**
+一句话：**沿线巡逻 → 停车扫人 → 发现即交战 → 人/线丢失后按规格回扫或巡线。**
 
----
-
-## 2. 产品规格（冻结）
-
-| 项目 | 规格 |
-|---|---|
-| 巡线颜色 | **蓝色**胶带（官方支持红/绿/蓝；**不支持黑线**） |
-| 线宽建议 | 约 15–25 mm |
-| 推荐路线形状 | **单环 / 跑道形**（见 §6.1；**不推荐默认 8 字**） |
-| 巡逻方式 | 循线前进一段时间 → **停车** → 云台扫描 → 无事则继续循线 |
-| 扫描 | **定时 / 分时 scan**（不要求边走边连续扫视） |
-| 入侵判定 | **是否识别到行人**（不使用精确 1 m 测距） |
-| 警告灯效 | **红色闪烁** |
-| 警告语音 | **本期不做**（以后再加；仓库 mp3 仅作素材） |
-| 警告动作 | **不需要**点头；告警以 **红灯闪烁** 为主 |
-| 锁定后满 3 s | 若人员仍在，开始点射 |
-| 点射节奏 | **每隔 1 秒点射 1 次**，直到人员离开 |
-| 人员离开 | 连续一段时间检测不到人 → 停火、停闪、恢复巡线 |
-| 运行环境 | S1 App 实验室 Python（车载） |
-| 开发方式 | Mac 编写 `onboard/` → 拷贝进 App 运行 |
-
-### 2.1 警告语音（最终版）
-
-**英文文案（音频内容）**
-
-```
-Intruder detected. Leave the area immediately. Or you will be fired upon. Consequences will be severe.
-```
-
-**中文语义对照**
-
-```
-发现入侵，请立刻离开，否则开火，后果自负。
-```
-
-| 文件 | 说明 |
-|---|---|
-| `resources/warning_intruder.mp3` | 最终警告音：`en-US-ChristopherNeural`，语速 **+25%**（急促），略降调 |
-| `resources/warning_intruder.vtt` | 字幕时间轴 |
-
-```bash
-afplay resources/warning_intruder.mp3
-# 或重新生成
-./scripts/generate_warning_audio.sh
-```
-
-> 说明：中文 TTS 试听自然度不理想，故最终采用英文。S1 实验室 **通常不能保证** 直接播放自定义 mp3；实现时默认 **内置警示音 + 红灯**，本 mp3 作演示素材与文案验收。
+自定义警告 mp3（`resources/`）为素材；车载默认用 **内置音效 + 灯色**（App 未必能播自定义文件）。
 
 ---
 
-## 3. 行为状态机
+## 2. 状态机（与代码一致）
 
 ```
-                 ┌──────────────┐
-                 │    INIT      │  使能线识别 / 行人识别，云台巡线俯角
-                 └──────┬───────┘
-                        ▼
-                 ┌──────────────┐
-          ┌─────►│   PATROL     │  低头循蓝线前进 T_move
-          │      └──────┬───────┘
-          │             │ 时间到 / 到达哨位
-          │             ▼
-          │      ┌──────────────┐
-          │      │    SCAN      │  停车；抬头；yaw 左右扫 T_scan
-          │      └──────┬───────┘
-          │        无人 │        有人
-          │             │          │
-          │             │          ▼
-          │             │   ┌──────────────┐
-          │             │   │    LOCK      │  停车；枪口指向人；红灯闪；播警告
-          │             │   └──────┬───────┘
-          │             │          │ 满 3s 且人仍在
-          │             │          ▼
-          │             │   ┌──────────────┐
-          │             │   │    FIRE      │  每隔 1s 点射 1 次；保持锁定与红闪
-          │             │   └──────┬───────┘
-          │             │          │ 连续 T_clear 检测不到人
-          │             │          ▼
-          │             │   ┌──────────────┐
-          │             └───│  RECOVER     │  停火；关红闪；云台回巡线角；找线
-          │                 └──────┬───────┘
-          │                        │
-          └────────────────────────┘
+INIT
+  │
+  ▼
+PATROL ──T_MOVE 贴线满──► SCAN
+  ▲                         │
+  │              hit≥3 发现人 │ 整圈无人
+  │                         ▼
+  │                        FIRE  ◄── 射 3s / 停瞄 3s
+  │                         │
+  │                    miss 放弃
+  │                         ▼
+  └──────── 有线 ◄──────── SCAN（可反复；无线继续 SCAN）
 ```
 
-### 3.1 默认可调参数
+| 状态 | 行为 |
+|------|------|
+| **PATROL** | 低头循蓝线 `T_MOVE` 秒；**不认人** |
+| **SCAN** | 停车；规划 yaw 步进扫视；步间查人 |
+| **FIRE** | 立即边瞄边射；SHOOT/HOLD 交替 |
 
-| 参数 | 建议初值 | 含义 |
-|---|---|---|
-| `T_move` | 2.0 s | 每次低头循线时长 |
-| `T_scan` | 4.0 s | 单次哨位扫描总时长 |
-| `YAW_SCAN_DEG` | ±60°～±90° | 扫描左右幅度 |
-| `PITCH_LINE` | 俯视（实车标定） | 巡线云台俯仰 |
-| `PITCH_SCAN` | 平视/略仰 | 扫人云台俯仰 |
-| `T_WARN_BEFORE_FIRE` | 3.0 s | 发现人后首次点射前等待 |
-| `T_FIRE_INTERVAL` | 1.0 s | 点射间隔 |
-| `T_clear` | 2.0 s | 连续无人多久算离开 |
-| `LINE_COLOR` | blue | 蓝色线 |
-| `ENABLE_FIRE` | 联调先 `false` | 是否允许实弹点射 |
+无 LOCK / RECOVER / LOST_SCAN 状态（细节见 `behavior-spec.md`）。
+
+### 主要可调参数（`line_guard.py` CONFIG）
+
+| 参数 | 当前约值 | 含义 |
+|------|----------|------|
+| `T_MOVE` | 6.0 s | 贴线多久进 SCAN |
+| `PERSON_HIT_NEED` | 3 | 连续 hit≥3 才算发现 → FIRE |
+| `PERSON_MISS_NEED` | 3 | 已射满 3s 后，连续 miss 超此 → SCAN |
+| `T_FIRE_ON` / `T_FIRE_OFF` | 3.0 / 3.0 s | 射击段 / 停火只瞄段 |
+| `SCAN_STEP_DEG` / `SCAN_LOOK_OPS` | 45° / 5 | 扫视步进；每角查人次数 |
+| `PITCH_LINE` / `PITCH_SCAN` | −20 / 20 | 巡线低头 / 扫人抬头 |
+| `LINE_SPEED_MAX` / `MIN` | 0.38 / 0.10 | 直道/弯道前进速度 |
+| `ENABLE_FIRE` | True | 是否允许水弹（联调可改 False） |
+
+灯光对照见 [`docs/design-notes.md`](docs/design-notes.md)。
 
 ---
 
-## 4. 技术边界
+## 3. 技术边界
 
 | 点 | 说明 |
-|---|---|
-| 单摄像头 | 巡线低头、扫人抬头 → **必须分时** |
-| 无精确 1 m | 用 **检测到人 = 入侵** |
+|----|------|
+| 单摄像头 | 巡线低头、扫人抬头 → **分时** |
+| 入侵 | **检测到人**（几何过滤减误报；无精确测距） |
 | 线颜色 | 仅红/绿/蓝；本项目固定 **蓝** |
-| 车载 Python | 沙箱 + 官方 API；无 pip、不以 `threading` 为主方案 |
-| 安全 | 水弹、勿对人面部；演示区与弹药限制 |
+| 车载 Python | 官方 API；**单文件**粘贴；无 pip / 不以 threading 为主 |
+| 水弹 | 俯仰过高时机内可能禁射；安全区域自理 |
 
-官方参考：
-
-- [RoboMaster 开发者文档](https://robomaster-dev.readthedocs.io/zh-cn/latest/)  
-- [S1 Programming Guide](https://www.dji.com/robomaster-s1/programming-guide)  
-
-本项目 **不依赖** 外部 PC SDK / S1 解锁。
+官方参考：[RoboMaster 开发者文档](https://robomaster-dev.readthedocs.io/zh-cn/latest/) · [S1 Programming Guide](https://www.dji.com/robomaster-s1/programming-guide)
 
 ---
 
-## 5. 仓库结构
+## 4. 仓库结构
 
 ```text
 s1-line-guard/
 ├── README.md
-├── LICENSE
-├── .gitignore
-├── resources/
-│   ├── warning_intruder.mp3   # 最终警告语音（英文急促）
-│   └── warning_intruder.vtt
+├── AGENTS.md
 ├── docs/
-│   └── design-notes.md
-├── onboard/                   # 粘贴进 S1 App 实验室的代码
-│   ├── README.md              # 含「单文件」约定
-│   ├── led_color_test.py      # 彩灯变色测试（先跑这个）
-│   ├── config.py / main.py    # 早期占位；正式版将合并为单文件分块
-├── logs/                      # 调试：截图/日志放这里；AI 读最新文件
-│   └── README.md
+│   ├── behavior-spec.md   # 行为权威
+│   ├── design-notes.md    # 灯光 / API 备忘
+│   └── dev-plan.md        # 里程碑摘要（须与现状一致）
+├── onboard/
+│   ├── line_guard.py      # ★ 正式哨兵（粘贴此文件）
+│   ├── README.md
+│   ├── line_pitch_test.py / person_detect_test.py / led_color_test.py
+│   └── wheel_clean.py
+├── resources/             # 警告音素材（非车载必需）
+├── logs/                  # 本地调试截图（一般不入库）
 └── scripts/
-    └── generate_warning_audio.sh
 ```
 
-调试时把 App 控制台截图丢进 `logs/`，对话里说「看 logs」即可（不必往聊天里贴图）。
-
-
----
-
-## 6. 场地、路线与安全
-
-### 6.1 推荐场地
-
-- 浅色地面 + **蓝色**色带（宽约 2 cm）  
-- 光线均匀，减少强逆光  
-- 测试人员正面进入扫描视野  
-
-### 6.2 路线形状：推荐单环；8 字有风险
-
-S1 循线 **没有全局路径概念**，只跟镜头里看到的色走，**不会“知道”这是 8 字**。
-
-| 形状 | 建议 | 说明 |
-|---|---|---|
-| **单环 / 跑道形（O）** | **推荐默认** | 行为稳定，适合哨位分时 SCAN |
-| 往返直线 / U 形 | 可用 | 端点需自行处理掉头，否则易出线 |
-| **8 字（∞）** | **不推荐作默认** | 见下方风险 |
-
-**8 字交叉口风险（请知悉）：**
-
-1. 交叉处画面出现多段线，循线易跟「最居中/对比最强」的一段，**没有换环逻辑**。  
-2. 常见结果是 **长期只在半边环绕圈**，而不是稳定走满 8 字。  
-3. 也可能在交叉口 **丢线、乱拐、振荡**。  
-4. 本项目的 **停车 SCAN** 后重新贴线，更容易再次贴进 **同一半环**，半边绕圈概率更高。  
-
-若坚持 8 字感，需额外路口策略（视觉标签、奇偶换向等），**超出当前 M0 默认范围**；第一版请用 **单环 / 跑道形**。
-
-### 6.3 开发与部署（实现阶段）
-
-1. 只改 `onboard/`，保持车载兼容。  
-2. 粘贴到 RoboMaster App → 实验室 → Python。  
-3. 分阶段联调：PATROL → SCAN → LOCK → FIRE。  
-
-### 6.4 安全清单
-
-- [ ] 弹道前方无人近距离面部  
-- [ ] 首次联调 **禁用开火**（`ENABLE_FIRE = false`）  
-- [ ] 确认 App 停止 / 电源急停  
+调试：App 控制台截图放入 `logs/`，对话说「看 logs」即可。
 
 ---
 
-## 7. 实现里程碑
+## 5. 场地与安全
 
-详细计划见 **[docs/dev-plan.md](./docs/dev-plan.md)**（正式开发以该文档为准）。
+- 浅色地面 + **蓝色**色带（约 15–25 mm）；推荐 **单环 / 跑道形**（默认不做 8 字路口策略）。  
+- 8 字交叉口易半环绕圈或丢线，不推荐作默认场地。  
+- 首次联调可将 `ENABLE_FIRE = False`；注意弹道与急停。
 
-| 阶段 | 内容 | 状态 |
-|---|---|---|
-| M0 | 需求冻结、骨架、彩灯测试、场地/8 字风险；**放弃本期语音** | **完成** |
-| M1 | 单文件 v1：`line_guard.py`（PID 瞄准+开火） | **待你实车测试反馈** |
-| M2 | 蓝线巡线接入 PATROL | 未开始 |
-| M3 | 行人 LOCK + 红闪（不开火） | 未开始 |
-| M4 | FIRE：3s 后每 1s 点射；`ENABLE_FIRE` 开关 | 未开始 |
-| M5 | RECOVER 找线、碰撞、参数与说明收尾 | 未开始 |
-| 以后 | 自定义音频 / 8 字路口等 | Backlog |
+### 上车步骤
+
+1. 打开 `onboard/line_guard.py`，确认首行 **VERSION stamp**  
+2. 全选复制 → App → 实验室 → Python → 粘贴运行  
+3. 蓝线单环；观察 PATROL → SCAN →（有人）FIRE  
 
 ---
 
-## 8. 许可
+## 6. 实现状态
 
-见 [LICENSE](./LICENSE)（MIT）。与 DJI / RoboMaster 商标及官方条款无关；硬件与官方 App 使用请遵守大疆规定。
+| 项 | 状态 |
+|----|------|
+| 单文件 `line_guard.py`（PATROL / SCAN / FIRE） | **在用**（以 VERSION 为准） |
+| 规格纪律 `behavior-spec` + `AGENTS` | **在用** |
+| 辅助测试脚本（灯 / 线 / 人 / 麦轮） | 按需粘贴 |
+
+详细条文只维护 **`docs/behavior-spec.md`**，勿以本文旧段落为准。
+
+---
+
+## 7. 许可
+
+见 [LICENSE](./LICENSE)（MIT）。与 DJI / RoboMaster 商标及官方条款无关。
