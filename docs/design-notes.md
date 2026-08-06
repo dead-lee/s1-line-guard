@@ -44,7 +44,7 @@
 
 ### 线 / 人
 
-- 线：必须 `RmList(get_line_detection_info())`，`len>=42` 且点数有效；控制用官方 cx=`[19]`，固定 `LINE_SPEED` 前进。  
+- 线：`RmList(get_line_detection_info())`，`len>=42` 且点数有效；cx=`[19]`；`err=0.5-cx` → PID → yaw；固定 `LINE_SPEED`。  
 - 人：`enable_detection(people)`；轮询 `get_people_detection_info` 或官方 `cond_wait`（阻塞，不宜插在步进 SCAN 中途单独依赖）。  
 - 行人误检（沙发/行李）官方无更好过滤器；几何启发式不可靠。
 

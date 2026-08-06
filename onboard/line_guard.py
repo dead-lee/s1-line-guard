@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.34.0 stamp=2026-08-06 21:20:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.34.1 stamp=2026-08-06 21:40:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -24,13 +24,14 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：单点 cx=[19] + PIDCtrl + 固定速度
-LINE_SPEED = 0.20
-LINE_PID_KP = 330.0
+# 巡线：单点 cx=[19] + PID + 固定速度；目标贴线不冲出
+LINE_SPEED = 0.14
+LINE_PID_KP = 220.0
 LINE_PID_KI = 0.0
-LINE_PID_KD = 28.0
-LINE_GIMBAL_YAW_MAX = 200.0
+LINE_PID_KD = 35.0
+LINE_GIMBAL_YAW_MAX = 120.0
 LINE_CX_DEADZONE = 0.02
+# 线在画面左侧(cx<0.5)时需正 yaw(左转)贴回 → 控制误差用 (0.5-cx)
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_FRAMES = 12
 LINE_LOG_DT = 1.0
@@ -697,7 +698,7 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """循线一步：err=cx-0.5 → PID → yaw；固定 LINE_SPEED 前进。"""
+    """循线一步：err=0.5-cx → PID → yaw；固定 LINE_SPEED 前进。"""
     global g_line_cx, g_line_err, g_line_yaw_spd, g_line_pts
     ok, cx, n, pts = line_read()
     g_line_pts = pts
@@ -711,7 +712,8 @@ def line_follow_step():
         chassis_halt()
         return
     g_line_cx = cx
-    err = cx - 0.5
+    # 0.5-cx：线偏左 → err>0 → 正 yaw 左转贴线（避免同号纠偏把车带出线）
+    err = 0.5 - cx
     g_line_err = err
     yaw_spd = 0.0
     if abs(err) >= LINE_CX_DEADZONE:
@@ -744,7 +746,7 @@ def line_follow_log_snapshot(tag):
     if g_patrol_line_t0 > 0.0:
         age = now_s() - g_patrol_line_t0
     log(
-        "PATROL %s cx=%.3f err=%+.3f yaw=%.0f spd=%.2f pts=%d hit=%d miss=%d age=%.2f"
+        "PATROL %s cx=%.3f err=%+.3f yaw=%+.0f spd=%.2f pts=%d hit=%d miss=%d age=%.2f"
         % (
             tag,
             g_line_cx,
@@ -1387,14 +1389,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.34.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.34.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.34.0 stamp=2026-08-06 21:20:00")
+    print("# LINE_GUARD_VERSION=1.34.1 stamp=2026-08-06 21:40:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
