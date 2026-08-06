@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.37.0 stamp=2026-08-06 22:30:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.37.1 stamp=2026-08-06 22:40:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -17,19 +17,21 @@ PERSON_FIRE_MIN_H = 0.16
 
 PITCH_LINE = -20                # 巡线低头绝对角
 PITCH_SCAN = 20                 # 扫人/交战抬头
-GIMBAL_YAW_SPEED = 540.0
+GIMBAL_YAW_SPEED = 360.0        # SCAN 绝对角步进；过高易转过头
 
 SCAN_CW = 180.0
 SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：官方 set_error(cx-0.5)+PIDCtrl；yaw 不反号；限幅防尖峰
-LINE_SPEED = 0.15
-LINE_PID_KP = 330.0
+# 巡线：err=cx-0.5 纯 P；温和增益 + 近中心再软，防转过头冲出线
+LINE_SPEED = 0.12
+LINE_PID_KP = 140.0
 LINE_PID_KI = 0.0
-LINE_PID_KD = 28.0
-LINE_YAW_MAX = 100.0            # 限制 |yaw|，防 D 项/尖峰甩飞
+LINE_PID_KD = 0.0
+LINE_YAW_MAX = 55.0             # 硬顶，防猛甩
+LINE_SOFT_ERR = 0.08            # |err| 小于此再衰减 yaw
+LINE_SOFT_GAIN = 0.45
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_S = 1.5
 LINE_LOG_DT = 1.0
@@ -690,22 +692,18 @@ def mode_ensure_line_follow(reason):
 
 def line_follow_step():
     """
-    官方：set_error(cx-0.5) → PID → rotate_with_speed；固定 LINE_SPEED。
-    不反号；|yaw| 限 LINE_YAW_MAX；不每帧 set_mode（避免跟线被重置）。
+    贴线：err=cx-0.5 → 纯 P → yaw（限幅+近中心软增益，减转过头）。
+    固定 LINE_SPEED；不每帧 set_mode。
     """
     global g_line_err, g_line_yaw_spd
     cx = g_line_cx
     err = cx - 0.5
     g_line_err = err
-    yaw_spd = 0.0
-    if g_line_pid is not None:
-        try:
-            g_line_pid.set_error(err)
-            yaw_spd = g_line_pid.get_output()
-        except Exception:
-            yaw_spd = err * LINE_PID_KP
-    else:
-        yaw_spd = err * LINE_PID_KP
+    abs_e = abs(err)
+    yaw_spd = err * LINE_PID_KP
+    # 近中心软刹：误差小则少转，避免左右甩过中线
+    if abs_e < LINE_SOFT_ERR and abs_e > 0.001:
+        yaw_spd = yaw_spd * LINE_SOFT_GAIN
     if yaw_spd > LINE_YAW_MAX:
         yaw_spd = LINE_YAW_MAX
     if yaw_spd < -LINE_YAW_MAX:
@@ -894,7 +892,7 @@ def scan_seg_label(qi, target):
     return "qi%d_to_%+.0f" % (qi, target)
 
 def scan_yaw_abs(tgt, reason):
-    """设定极限转速后绝对 yaw_ctrl 到 tgt。返回 (yaw0, yaw1, dt_s)。"""
+    """绝对 yaw_ctrl 到 tgt；到位后 stop，降低过冲。返回 (yaw0, yaw1, dt_s)。"""
     gimbal_stop()
     set_gimbal_speed(GIMBAL_YAW_SPEED)
     y0 = get_yaw()
@@ -903,9 +901,17 @@ def scan_yaw_abs(tgt, reason):
         gimbal_ctrl.yaw_ctrl(tgt)
     except Exception:
         log("SCAN yaw_ctrl FAIL tgt=%.0f" % tgt)
+    # 闭环到位后再停转，减轻惯性过冲
+    try:
+        gimbal_ctrl.stop()
+    except Exception:
+        pass
+    try:
+        gimbal_ctrl.rotate_with_speed(0, 0)
+    except Exception:
+        pass
     y1 = get_yaw()
     dt = now_s() - t0
-    gimbal_stop()
     log("SCAN yaw_ctrl %.0f -> %.0f (got %.0f) spd=%.0f dt=%.3f | %s" % (
         y0, tgt, y1, GIMBAL_YAW_SPEED, dt, reason
     ))
@@ -1370,14 +1376,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.37.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.37.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.37.0 stamp=2026-08-06 22:30:00")
+    print("# LINE_GUARD_VERSION=1.37.1 stamp=2026-08-06 22:40:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
