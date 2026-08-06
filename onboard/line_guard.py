@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.33.0 stamp=2026-08-06 22:30:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.33.1 stamp=2026-08-06 21:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -42,6 +42,7 @@ LINE_CX_JUMP = 0.10             # cx 突变跟新，防 EMA 在弯内拖反向
 LINE_DIVERGE_CORNER = 0.07      # |远-近|≥此 → 近点主导 + 强制慢速
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_FRAMES = 12
+LINE_LOG_DT = 0.25              # 巡线过程日志间隔（秒），便于查不稳原因
 
 # 瞄准 PID：远距快锁、近中心软刹
 AIM_YAW_KP = 95.0
@@ -112,6 +113,10 @@ g_line_ever_ok = False
 g_line_pid = None
 g_line_cx_smooth = 0.5
 g_line_diverge = 0.0            # |远点cx-近点cx|，弯道判据
+g_line_cx_near = 0.5
+g_line_cx_mid = 0.5
+g_line_cx_far = 0.5
+g_line_log_t = 0.0              # 上次 PATROL 过程日志时间
 # 记忆框：FOUND 建立；有检出刷新；无检出仍用于瞄准/开火
 g_track_on = False
 g_track_x = 0.5
@@ -549,9 +554,9 @@ def line_cx_from_info(info, pts):
     控制用 cx：近/中/远融合。
     点列 (x,y) 交替时远点 x≈[19]；近≈[7]、中≈[13]（与官方 RmList 一致时）。
     远近分歧大（急弯）→ 近点主导，避免只跟远点转错弯/冲出线。
-    返回 (cx, diverge)；失败 (None, 0)。
+    返回 (cx, diverge)；失败 (None, 0)。诊断量写入 g_line_cx_near/mid/far。
     """
-    global g_line_diverge
+    global g_line_diverge, g_line_cx_near, g_line_cx_mid, g_line_cx_far
     cx_far = None
     try:
         cx_far = float(info[19])
@@ -560,6 +565,7 @@ def line_cx_from_info(info, pts):
     if cx_far is None:
         g_line_diverge = 0.0
         return None, 0.0
+    g_line_cx_far = cx_far
     cx_near = None
     cx_mid = None
     try:
@@ -576,9 +582,13 @@ def line_cx_from_info(info, pts):
         cx_mid = None
     if cx_near is None or pts < 3:
         g_line_diverge = 0.0
+        g_line_cx_near = cx_far
+        g_line_cx_mid = cx_far
         return cx_far, 0.0
     if cx_mid is None:
         cx_mid = 0.5 * (cx_near + cx_far)
+    g_line_cx_near = cx_near
+    g_line_cx_mid = cx_mid
     diverge = abs(cx_far - cx_near)
     g_line_diverge = diverge
     if diverge >= LINE_DIVERGE_CORNER:
@@ -850,6 +860,43 @@ def line_follow_step():
             chassis_ctrl.move_with_speed(spd, 0, 0)
         except Exception:
             chassis_halt()
+
+def line_follow_log_snapshot(tag):
+    """
+    巡线诊断一行。字段：
+      cx=控制用中心  n/m/f=近中远  div=|远-近|
+      err=cx-0.5  yaw=云台转速  spd=前进  pts hit miss age
+    """
+    age = 0.0
+    if g_patrol_line_t0 > 0.0:
+        age = now_s() - g_patrol_line_t0
+    log(
+        "PATROL %s cx=%.3f n=%.2f m=%.2f f=%.2f div=%.2f err=%+.3f yaw=%.0f spd=%.2f pts=%d hit=%d miss=%d age=%.2f"
+        % (
+            tag,
+            g_line_cx,
+            g_line_cx_near,
+            g_line_cx_mid,
+            g_line_cx_far,
+            g_line_diverge,
+            g_line_err,
+            g_line_yaw_spd,
+            g_line_spd,
+            g_line_pts,
+            g_line_hit,
+            g_line_miss,
+            age,
+        )
+    )
+
+def line_follow_log_tick():
+    """贴线推进时限频打过程日志。"""
+    global g_line_log_t
+    t = now_s()
+    if g_line_log_t > 0.0 and (t - g_line_log_t) < LINE_LOG_DT:
+        return
+    g_line_log_t = t
+    line_follow_log_snapshot("run")
 
 def fire_stop():
     gun_ctrl.stop()
@@ -1253,14 +1300,21 @@ def set_state(s, reason):
         g_line_cx = 0.5
         g_line_cx_smooth = 0.5
         g_line_diverge = 0.0
+        g_line_cx_near = 0.5
+        g_line_cx_mid = 0.5
+        g_line_cx_far = 0.5
         g_line_err = 0.0
         g_line_yaw_spd = 0.0
         g_line_spd = 0.0
+        g_line_log_t = 0.0
         g_line_ever_ok = False
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-        log("PATROL ready spd=%.2f~%.2f near-corner" % (LINE_SPEED_MIN, LINE_SPEED_MAX))
+        log(
+            "PATROL ready spd=%.2f~%.2f log_dt=%.2fs"
+            % (LINE_SPEED_MIN, LINE_SPEED_MAX, LINE_LOG_DT)
+        )
 
     # SCAN：完整两遍步进扫描
     if s == STATE_SCAN:
@@ -1293,17 +1347,25 @@ def set_state(s, reason):
 
 def tick_patrol():
     """蓝线巡线 T_MOVE 秒后进 SCAN；巡线阶段不认人。"""
-    global g_patrol_line_t0
+    global g_patrol_line_t0, g_line_log_t
     line_update()
     if line_stable_false():
         if g_line_ever_ok:
+            line_follow_log_snapshot("LOST")
+            log(
+                "PATROL leave no_line_stable miss=%d hit=%d ever=1 -> SCAN"
+                % (g_line_miss, g_line_hit)
+            )
             g_patrol_line_t0 = 0.0
+            g_line_log_t = 0.0
             person_hit_reset()
             set_state(STATE_SCAN, "no_line_stable")
             return
         if state_age() >= 4.0:
-            log("PATROL no line ever -> SCAN")
+            line_follow_log_snapshot("never")
+            log("PATROL leave no_line_timeout age=%.1fs -> SCAN" % state_age())
             g_patrol_line_t0 = 0.0
+            g_line_log_t = 0.0
             set_state(STATE_SCAN, "no_line_timeout")
             return
         try:
@@ -1313,6 +1375,9 @@ def tick_patrol():
         chassis_halt()
         return
     if line_stable_true() == False:
+        # 线不稳等待确认：偶尔打一条，避免刷屏
+        if g_line_miss == 1 or g_line_hit == 1:
+            line_follow_log_snapshot("wait")
         try:
             gimbal_ctrl.rotate_with_speed(0, 0)
         except Exception:
@@ -1321,14 +1386,16 @@ def tick_patrol():
         return
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
+        g_line_log_t = 0.0
         mode_ensure_line_follow("patrol_follow_begin")
-        log("PATROL follow start cx=%.2f pts=%d" % (g_line_cx, g_line_pts))
+        line_follow_log_snapshot("start")
     line_follow_step()
+    line_follow_log_tick()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
-        age = now_s() - g_patrol_line_t0
+        line_follow_log_snapshot("done")
         g_patrol_line_t0 = 0.0
+        g_line_log_t = 0.0
         person_hit_reset()
-        log("PATROL follow done age=%.2fs -> SCAN" % age)
         set_state(STATE_SCAN, "follow_time_up")
 
 def scan_look_should_keep():
@@ -1462,14 +1529,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.33.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.33.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.33.0 stamp=2026-08-06 22:30:00")
+    print("# LINE_GUARD_VERSION=1.33.1 stamp=2026-08-06 21:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
