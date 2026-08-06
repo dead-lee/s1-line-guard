@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.37.1 stamp=2026-08-06 22:40:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.37.2 stamp=2026-08-06 22:50:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -17,7 +17,7 @@ PERSON_FIRE_MIN_H = 0.16
 
 PITCH_LINE = -20                # 巡线低头绝对角
 PITCH_SCAN = 20                 # 扫人/交战抬头
-GIMBAL_YAW_SPEED = 360.0        # SCAN 绝对角步进；过高易转过头
+GIMBAL_YAW_SPEED = 540.0
 
 SCAN_CW = 180.0
 SCAN_CCW = -180.0
@@ -892,7 +892,7 @@ def scan_seg_label(qi, target):
     return "qi%d_to_%+.0f" % (qi, target)
 
 def scan_yaw_abs(tgt, reason):
-    """绝对 yaw_ctrl 到 tgt；到位后 stop，降低过冲。返回 (yaw0, yaw1, dt_s)。"""
+    """设定转速后绝对 yaw_ctrl 到 tgt。返回 (yaw0, yaw1, dt_s)。"""
     gimbal_stop()
     set_gimbal_speed(GIMBAL_YAW_SPEED)
     y0 = get_yaw()
@@ -901,17 +901,9 @@ def scan_yaw_abs(tgt, reason):
         gimbal_ctrl.yaw_ctrl(tgt)
     except Exception:
         log("SCAN yaw_ctrl FAIL tgt=%.0f" % tgt)
-    # 闭环到位后再停转，减轻惯性过冲
-    try:
-        gimbal_ctrl.stop()
-    except Exception:
-        pass
-    try:
-        gimbal_ctrl.rotate_with_speed(0, 0)
-    except Exception:
-        pass
     y1 = get_yaw()
     dt = now_s() - t0
+    gimbal_stop()
     log("SCAN yaw_ctrl %.0f -> %.0f (got %.0f) spd=%.0f dt=%.3f | %s" % (
         y0, tgt, y1, GIMBAL_YAW_SPEED, dt, reason
     ))
@@ -1376,14 +1368,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.37.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.37.2 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.37.1 stamp=2026-08-06 22:40:00")
+    print("# LINE_GUARD_VERSION=1.37.2 stamp=2026-08-06 22:50:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
