@@ -16,7 +16,7 @@ PERSON_FIRE_MIN_W = 0.10        # 开火框最小宽（记忆框尺寸也用此�
 PERSON_FIRE_MIN_H = 0.16
 
 PITCH_LINE = -20                # 巡线低头绝对角
-PITCH_SCAN = 20                 # 扫人/交战抬头（水弹约>10°禁射）
+PITCH_SCAN = 20                 # 扫人/交战抬头
 GIMBAL_YAW_SPEED = 540.0
 
 SCAN_CW = 180.0
@@ -24,8 +24,7 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线（基于 1.32.2）：弯道减速 + 近点优先，目标「不转错弯、不冲出线」
-# 不做丢线后特殊处理；丢线仍走规格默认（stable_false → SCAN）
+# 巡线：弯道减速 + 近点优先，目标不转错弯、不冲出线
 LINE_SPEED_MAX = 0.38
 LINE_SPEED_MIN = 0.10
 LINE_PID_KP = 340.0
@@ -43,9 +42,8 @@ LINE_CX_JUMP = 0.10             # cx 突变跟新，防 EMA 在弯内拖反向
 LINE_DIVERGE_CORNER = 0.07      # |远-近|≥此 → 近点主导 + 强制慢速
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_FRAMES = 12
-LINE_SPEED = LINE_SPEED_MAX     # 兼容旧名
 
-# 瞄准 PID（1.32.1）：远距快锁、近中心软刹
+# 瞄准 PID：远距快锁、近中心软刹
 AIM_YAW_KP = 95.0
 AIM_YAW_KI = 6.0
 AIM_YAW_KD = 38.0
