@@ -1,89 +1,65 @@
-# LINE_GUARD_VERSION=1.27.0 stamp=2026-08-05 00:10:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.32.0 stamp=2026-08-06 18:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
-# 权威行为规格（改本文件前必读，禁止与之冲突）：
-#   仓库 docs/behavior-spec.md
-# 新增额外能力须先确认并写入规格，再改代码。
-#
-# 摘要：
-#   PATROL  贴线 T_MOVE，不认人
-#   SCAN    45° 步进；hit≥3→LOCK；整圈无人有线→PATROL；无线→原地再 SCAN
-#   LOCK/FIRE  当前框 PID；射3s/停火瞄3s；miss>3→立刻整圈 SCAN
-#   RECOVER 有线→PATROL；无线→SCAN
+# 权威行为规格：../docs/behavior-spec.md（未写入规格的限制禁止实现）
+# 摘要：hit≥3 → 立即 FIRE 边瞄边射；至少射满 3s；之后 miss>3 才重扫
 
 # =============================================================================
 # CONFIG — 可调参数
 # =============================================================================
-# --- 时间 / 认人门控（认人、丢失一律用连续次数）---
 T_MOVE = 6.0                    # PATROL 贴线前进多久（秒）后进入 SCAN
-PERSON_HIT_NEED = 3             # 连续 hit 次数 → 确认有人，进 LOCK
-PERSON_MISS_NEED = 3            # 连续 miss 超过此值（miss > 3）→ 确认丢失，整圈 SCAN
+PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIRE
+PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
-# --- 开火框 ---
-PERSON_FIRE_MIN_W = 0.10        # 允许 IR/水弹的最小框宽（归一化）
-PERSON_FIRE_MIN_H = 0.16        # 允许 IR/水弹的最小框高（归一化）
+PERSON_FIRE_MIN_W = 0.10        # 开火框最小宽（记忆框尺寸也用此）
+PERSON_FIRE_MIN_H = 0.16
 
-# --- 云台俯仰（绝对角，约 -20~+35）---
-PITCH_LINE = -20                # 巡线/找线低头姿态
-PITCH_SCAN = 20                 # 扫人/锁目标时抬头姿态（注意：水弹硬件约>10°禁射）
+PITCH_LINE = -20                # 巡线低头绝对角
+PITCH_SCAN = 20                 # 扫人/交战抬头（水弹约>10°禁射）
+GIMBAL_YAW_SPEED = 540.0
 
-# --- SCAN 几何与步进 ---
-SCAN_CW = 180.0                 # 扫描大目标：顺时针绝对 yaw（度）
-SCAN_CCW = -180.0               # 扫描大目标：逆时针绝对 yaw（度）
-SCAN_YAW_SPEED = 540.0          # 扫描 yaw_ctrl 前 set_rotate_speed（°/s，近极限）
-SCAN_STEP_DEG = 45.0            # 每步绝对角最大步进（度）
-SCAN_LOOK_OPS = 5               # 每角位最少查人次数；无人则满此数转下一角
-SCAN_LOOK_OPS_MAX = 8           # 末段有部分 hit 时最多查人次数（凑满 PERSON_HIT_NEED）
-YAW_ARRIVE = 10.0               # 认为到达大段目标 yaw 的误差容限（度）
-HOME_YAW_SPEED = 540.0          # 回中/摆姿态时的云台转速（°/s）
-T_SCAN_MAX = 90.0               # 单次 SCAN 状态最长秒数，超时 → RECOVER
+SCAN_CW = 180.0
+SCAN_CCW = -180.0
+SCAN_STEP_DEG = 45.0
+SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# --- PATROL 循线（官方 RmList + PID）---
-LINE_SPEED = 0.30               # 底盘循线平移速度（m/s）
-LINE_PID_KP = 330.0             # 线跟踪 PID 比例（官方示例 330）
-LINE_PID_KI = 0.0               # 线跟踪 PID 积分
-LINE_PID_KD = 28.0              # 线跟踪 PID 微分（官方示例 28）
-LINE_GIMBAL_YAW_MAX = 300.0     # 循线时云台 yaw 速度输出限幅（°/s）
-LINE_CX_DEADZONE = 0.02         # 线中心误差死区（|cx-0.5| 小于此不转）
-LINE_CONFIRM_FRAMES = 3         # 判定「有线稳定」的连续有效帧数
-LINE_LOST_FRAMES = 12           # 跟线中判定丢线的连续无效帧数（比确认更严）
-LINE_LOOK_DOWN_DEG = 20         # 进 PATROL 相对低头度数（官方 down 20）
+LINE_SPEED = 0.30
+LINE_PID_KP = 330.0
+LINE_PID_KI = 0.0
+LINE_PID_KD = 28.0
+LINE_GIMBAL_YAW_MAX = 300.0
+LINE_CX_DEADZONE = 0.02
+LINE_CONFIRM_FRAMES = 3
+LINE_LOST_FRAMES = 12
 
-# --- 瞄准 PID（LOCK/FIRE 跟人体框）---
-AIM_YAW_KP = 100.0              # 瞄准 yaw PID 比例
-AIM_YAW_KI = 0.0                # 瞄准 yaw PID 积分
-AIM_YAW_KD = 20.0               # 瞄准 yaw PID 微分
-AIM_YAW_OUT_MAX = 150.0         # 瞄准 yaw 速度正常上限（°/s）
-AIM_PITCH_KP = 70.0             # 瞄准 pitch PID 比例
-AIM_PITCH_KI = 0.0              # 瞄准 pitch PID 积分
-AIM_PITCH_KD = 16.0             # 瞄准 pitch PID 微分
-AIM_PITCH_OUT_MAX = 50.0        # 瞄准 pitch 速度上限（°/s）
-AIM_DEADZONE = 0.04             # 图像误差死区，小于此不输出速度
-AIM_OK_ERR = 0.10               # 认为「大致对准」的误差阈值（PID 可停转）
-AIM_ACQUIRE_ERR = 0.22          # |err_yaw|≥此值视为边缘大误差，换用加速上限
-AIM_ACQUIRE_YAW_MAX = 220.0     # 边缘拉回时的 yaw 速度上限（°/s）
-AIM_FIRE_MAX_ERR = 0.18         # 首次 IR/开火前：|x-0.5|、|y-0.5| 须≤此值
-AIM_TRACK_FIRE_ERR = 0.28       # 交战中可射：允许略偏（人在动）
+AIM_YAW_KP = 100.0
+AIM_YAW_KI = 0.0
+AIM_YAW_KD = 20.0
+AIM_YAW_OUT_MAX = 150.0
+AIM_PITCH_KP = 70.0
+AIM_PITCH_KI = 0.0
+AIM_PITCH_KD = 16.0
+AIM_PITCH_OUT_MAX = 50.0
+AIM_DEADZONE = 0.04
+AIM_OK_ERR = 0.10
+AIM_ACQUIRE_ERR = 0.22
+AIM_ACQUIRE_YAW_MAX = 220.0
 
-# --- 行人检出几何过滤（API 报人后再筛；对扶手等仍可能误放行）---
-PERSON_MIN_W = 0.08             # 有效人体最小框宽
-PERSON_MIN_H = 0.14             # 有效人体最小框高
-PERSON_MIN_ASPECT = 1.15        # 最小高宽比 h/w（偏扁框拒绝）
-PERSON_MAX_CY = 0.72            # 框中心 y 上限（过靠下拒绝）
+PERSON_MIN_W = 0.08
+PERSON_MIN_H = 0.14
+PERSON_MIN_ASPECT = 1.15
+PERSON_MAX_CY = 0.72
 
-# --- LOCK 接敌 / FIRE 射停交替（见 behavior-spec）---
-T_AIM_BEFORE_IR = 0.5           # 进 LOCK 后至少瞄准这么久（秒）才允许 IR
-T_LOCK_AIM_MAX = 6.0            # LOCK 接敌超时（秒）仍未居中可射 → 重扫
-T_FIRE_ON = 3.0                 # FIRE 射击段时长（秒）：瞄准+射击
-T_FIRE_OFF = 3.0                # FIRE 停火段时长（秒）：只瞄准不射击
-FIRE_PULSE_INTERVAL = 0.18      # 射击段内两次 fire_once 最小间隔（秒）
-FIRE_BEADS_PER_PULSE = 2        # 每次 fire_once 设定的弹数（1~8）
-FIRE_USE_PULSE = True           # True=短间隔 fire_once；False=fire_continuous
+T_FIRE_ON = 3.0                 # 射击段：边瞄边射
+T_FIRE_OFF = 3.0                # 停火段：只瞄
+FIRE_PULSE_INTERVAL = 0.18
+FIRE_BEADS_PER_PULSE = 2
+FIRE_USE_PULSE = True
 
-ENABLE_FIRE = True              # False=不 IR/不水弹（只跟瞄走状态）
-FORCE_NO_LINE = False           # True=强制当无线（调试用，跳过真实线识别）
-FLASH_HZ = 3                    # 部分灯效闪烁频率（Hz）
+ENABLE_FIRE = True
+FORCE_NO_LINE = False
+FLASH_HZ = 3
 
 # =============================================================================
 # STATE — 状态机与全局变量
@@ -127,16 +103,23 @@ g_line_pts = 0
 g_line_ever_ok = False
 g_line_pid = None
 g_line_look_done = False
+# 锁定后记忆框（FOUND 时建立；有检出则刷新；无检出仍用于瞄准/开火）
+g_track_on = False
+g_track_x = 0.5
+g_track_y = 0.5
+g_track_w = 0.2
+g_track_h = 0.3
+g_min_fire_done = False         # 是否已完成至少一整段 3s 射击
 
-# SCAN 队列与当前段
+# SCAN 队列与当前段（规划角步进，不读实测 yaw 做到达判定）
 g_scan_queue = []
 g_scan_qi = 0
 g_scan_target_yaw = 0.0
-g_scan_last_yaw = 0.0
-g_scan_stuck = 0
+g_scan_planned_yaw = 0.0        # 规划上当前角（上一步 yaw_ctrl 指令目标）
+g_scan_waypoints = []           # 本段待转的绝对角序列
+g_scan_wi = 0                   # 下一航点下标
 g_scan_seg_name = ""
 g_mode_tag = "free"
-# SCAN 诊断：步进序号、本角位已做查人次数（固定操作计数，非 sleep）
 g_scan_step_i = 0
 g_scan_look_ops = 0
 g_scan_cycle_look_ops = 0
@@ -233,6 +216,20 @@ def leds_off():
     except Exception:
         pass
 
+# -----------------------------------------------------------------------------
+# 机身灯光含义（测试时对照）
+#
+#  | 何时              | 颜色观感     | 效果              | 枪口灯 |
+#  | PATROL 巡线       | 绿常亮       | always_on         | 关     |
+#  | SCAN 扫人/换段    | 蓝闪 + 顶跑马 | flash + marquee  | 关     |
+#  | SCAN 段回中(≈0°)  | 黄呼吸       | breath            | 关     |
+#  | 发现人 / IR / 停火瞄 | 红闪      | flash             | 关     |
+#  | FIRE 射击段(射3s) | 红闪         | flash 很快        | 开     |
+#  | 确认丢人→重扫前   | 紫闪         | flash             | 关     |
+#  | RECOVER 找线      | 绿常亮       | always_on（同巡线）| 关     |
+#
+# 红闪无枪口=交战中未射（发现/IR/停火瞄）；红闪+枪口=正在射；紫闪=丢人；绿=巡线/找线。
+# -----------------------------------------------------------------------------
 def leds_set(r, g, b, effect, flash_hz, top_marquee=False, gun_on=False):
     leds_off()
     if gun_on:
@@ -255,41 +252,51 @@ def leds_set(r, g, b, effect, flash_hz, top_marquee=False, gun_on=False):
             pass
 
 def fx_patrol():
+    """绿灯常亮 = PATROL 巡线中。"""
     leds_set(0, 255, 0, rm_define.effect_always_on, FLASH_HZ)
     sfx(rm_define.media_sound_solmization_2C)
 
 def fx_scan():
+    """蓝闪+顶跑马 = SCAN 扫人开始/进行中。"""
     leds_set(0, 80, 255, rm_define.effect_flash, 5, top_marquee=True)
     sfx(rm_define.media_sound_scanning)
 
 def fx_scan_seg(seg_name):
+    """蓝闪+顶跑马 = SCAN 进入某一大段（与 fx_scan 同色）。"""
     leds_set(0, 80, 255, rm_define.effect_flash, 5, top_marquee=True)
     sfx(rm_define.media_sound_scanning)
     log("SCAN seg start: %s" % seg_name)
 
 def fx_recenter():
+    """黄呼吸 = 云台回中/扫到 0° 段。"""
     leds_set(255, 200, 0, rm_define.effect_breath, FLASH_HZ)
     sfx(rm_define.media_sound_gimbal_rotate)
 
 def fx_lock():
-    leds_set(200, 0, 255, rm_define.effect_flash, 6)
+    """红闪 = 发现人，报警并进入瞄准/交战（与「仅瞄准」区分无关，直接报警色）。"""
+    leds_set(255, 0, 0, rm_define.effect_flash, 6)
     sfx(rm_define.media_sound_recognize_success)
 
 def fx_fire_ir_led():
-    leds_set(255, 100, 0, rm_define.effect_flash, 7)
+    """红闪 = 红外示警（仍属交战报警，无枪口灯）。"""
+    leds_set(255, 0, 0, rm_define.effect_flash, 7)
 
 def fx_fire_burst_led():
+    """红闪+枪口灯 = FIRE 射击段（约 3s 在射水弹）。"""
     leds_set(255, 0, 0, rm_define.effect_flash, 8, gun_on=True)
 
 def fx_fire_wait_led():
-    leds_set(255, 140, 0, rm_define.effect_always_on, FLASH_HZ)
+    """红闪无枪口 = FIRE 停火段（约 3s 只瞄不射；与发现人/IR 同红闪）。"""
+    leds_set(255, 0, 0, rm_define.effect_flash, 6)
 
 def fx_person_lost():
-    leds_set(255, 140, 0, rm_define.effect_breath, FLASH_HZ)
+    """紫闪 = 确认丢人，即将整圈重扫。"""
+    leds_set(200, 0, 255, rm_define.effect_flash, 5)
     sfx(rm_define.media_sound_attacked)
 
 def fx_recover():
-    leds_set(255, 255, 255, rm_define.effect_flash, 2)
+    """绿常亮 = RECOVER 找线（与 PATROL 同色：都在找/跟线）。"""
+    leds_set(0, 255, 0, rm_define.effect_always_on, FLASH_HZ)
     sfx(rm_define.media_sound_solmization_1G)
 
 # =============================================================================
@@ -372,35 +379,88 @@ def person_hit_reset():
     g_person_hit = 0
 
 def person_hit_update(need):
-    """连续 need 帧见到人则确认。"""
+    """
+    连续 need 帧有效检出才确认「发现人」。
+    hit 为 1..need-1 只累计，不算发现，不触发 LOCK/交战。
+    """
     global g_person_hit
+    if need < 1:
+        need = 1
     if people_seen():
         g_person_hit = g_person_hit + 1
     else:
         g_person_hit = 0
     return g_person_hit >= need
 
-def person_track_update():
-    """LOCK/FIRE：更新 miss；仅当前帧有效检出算有人。"""
-    global g_person_miss
+def person_found():
+    """当前是否已达「发现人」门槛（hit≥PERSON_HIT_NEED）。"""
+    return g_person_hit >= PERSON_HIT_NEED
+
+def track_clear():
+    global g_track_on, g_track_x, g_track_y, g_track_w, g_track_h
+    g_track_on = False
+    g_track_x = 0.5
+    g_track_y = 0.5
+    g_track_w = 0.2
+    g_track_h = 0.3
+
+def track_set(x, y, w, h):
+    """建立/刷新锁定记忆框。"""
+    global g_track_on, g_track_x, g_track_y, g_track_w, g_track_h
+    g_track_on = True
+    g_track_x = x
+    g_track_y = y
+    g_track_w = w
+    g_track_h = h
+
+def track_from_people():
+    """若本帧有效检出则刷新记忆框，返回是否刷新。"""
     ok, x, y, w, h = people_get_first()
     if ok:
+        track_set(x, y, w, h)
+        return True
+    return False
+
+def person_track_update():
+    """
+    LOCK/FIRE：有检出则刷新记忆框并清 miss；
+    无检出则 miss+1，记忆框保留（静态/闪断仍继续瞄）。
+    """
+    global g_person_miss
+    if track_from_people():
         g_person_miss = 0
         return True
     g_person_miss = g_person_miss + 1
     return False
 
 def person_confirmed_lost():
-    """连续 miss 超过 PERSON_MISS_NEED（miss > 3）→ 整圈 SCAN。"""
+    """
+    须已完成至少 3s 射击后，连续 miss 超过 PERSON_MISS_NEED 才放弃。
+    首段射击完成前不因 miss 重扫。
+    """
+    if g_min_fire_done == False:
+        return False
     return g_person_miss > PERSON_MISS_NEED
 
 def leave_combat_to_rescan(reason):
-    """人员消失：停火，立即从 SCAN 起点重跑完整循环。"""
+    """结束交战：停火、清记忆，整圈 SCAN。"""
+    global g_min_fire_done
     fire_stop()
     person_hit_reset()
+    track_clear()
+    g_min_fire_done = False
     pid_reset_aim()
     fx_person_lost()
     set_state(STATE_SCAN, "rescan_after_%s" % reason)
+
+def engage_fire_immediate(reason):
+    """
+    发现人后立即进入 FIRE：边瞄边射（不经长时间只瞄的 LOCK）。
+    """
+    log("ENGAGE immediate FIRE | %s track=(%.2f,%.2f)" % (
+        reason, g_track_x, g_track_y
+    ))
+    set_state(STATE_FIRE, reason)
 
 def leave_combat_to_recover(reason):
     """停火后去找线（无冷却，可立刻再被 SCAN 认人）。"""
@@ -448,11 +508,17 @@ def aim_pid_towards_xy(x, y, dt):
     return False
 
 def aim_pid_track():
-    """瞄准步进：仅跟当前帧有效框；无检出则停转（无 coast）。"""
+    """
+    瞄准：有当前检出跟当前；否则若已锁定则跟记忆框（支持静态/闪断）。
+    无记忆且无检出才停转。
+    """
     dt = aim_pid_dt()
     ok, x, y, w, h = people_get_first()
     if ok:
+        track_set(x, y, w, h)
         return aim_pid_towards_xy(x, y, dt), True
+    if g_track_on:
+        return aim_pid_towards_xy(g_track_x, g_track_y, dt), False
     gimbal_stop()
     return False, False
 
@@ -544,8 +610,11 @@ def line_pid_init():
         log("LINE PIDCtrl unavailable, P only")
 
 def line_look_down_official():
-    """相对低头 LINE_LOOK_DOWN_DEG，对准地面蓝线。"""
+    """低头到 PITCH_LINE：先水平再相对 down(-PITCH_LINE)，失败则绝对 pitch_ctrl。"""
     global g_line_look_done
+    down_deg = -PITCH_LINE
+    if down_deg < 0:
+        down_deg = -down_deg
     try:
         gimbal_ctrl.rotate_with_speed(0, 0)
     except Exception:
@@ -559,14 +628,14 @@ def line_look_down_official():
     except Exception:
         pass
     try:
-        gimbal_ctrl.rotate_with_degree(rm_define.gimbal_down, LINE_LOOK_DOWN_DEG)
+        gimbal_ctrl.rotate_with_degree(rm_define.gimbal_down, down_deg)
         g_line_look_done = True
-        log("LINE look_down relative %d deg" % LINE_LOOK_DOWN_DEG)
+        log("LINE look_down relative %d deg (pitch_line=%d)" % (down_deg, PITCH_LINE))
     except Exception:
         try:
-            gimbal_ctrl.pitch_ctrl(-LINE_LOOK_DOWN_DEG)
+            gimbal_ctrl.pitch_ctrl(PITCH_LINE)
             g_line_look_done = True
-            log("LINE look_down fallback pitch=%d" % (-LINE_LOOK_DOWN_DEG))
+            log("LINE look_down fallback pitch=%d" % PITCH_LINE)
         except Exception:
             log("LINE look_down FAIL")
 
@@ -574,14 +643,14 @@ def line_look_down_official():
 # ACTUATORS — 云台姿态、模式、循线步进、射击
 # =============================================================================
 def gimbal_set_pitch_line():
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     try:
         gimbal_ctrl.pitch_ctrl(PITCH_LINE)
     except Exception:
         pass
 
 def gimbal_set_pitch_scan():
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     try:
         gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
     except Exception:
@@ -598,7 +667,7 @@ def gimbal_ensure_pitch_scan_soft():
             return
     except Exception:
         pass
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     try:
         gimbal_ctrl.pitch_ctrl(PITCH_SCAN)
     except Exception:
@@ -606,7 +675,7 @@ def gimbal_ensure_pitch_scan_soft():
 
 def gimbal_pose_line():
     """巡线姿态：yaw=0，pitch 低头。"""
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     try:
         gimbal_ctrl.angle_ctrl(0, PITCH_LINE)
     except Exception:
@@ -715,44 +784,26 @@ def fire_stop():
         pass
 
 def person_fire_ok():
-    """当前帧有人体且框够大，允许 IR/水弹。"""
+    """
+    允许 IR/水弹：
+      当前帧 solid 框；或
+      已锁定记忆框且记忆框尺寸够大（静态/闪断仍可完成射击）。
+    """
     ok, x, y, w, h = people_get_first()
-    if ok == False:
-        return False
-    try:
-        if w < PERSON_FIRE_MIN_W or h < PERSON_FIRE_MIN_H:
-            return False
-    except Exception:
-        return False
-    return True
-
-def person_aim_err():
-    """当前人体相对画面中心误差 (ey, ep)。无有效检出返回 (1,1)。"""
-    ok, x, y, w, h = people_get_first()
-    if ok == False:
-        return 1.0, 1.0
-    return abs(x - 0.5), abs(y - 0.5)
-
-def person_aim_centered():
-    """首次开火门：当前框大致对准。"""
-    ey, ep = person_aim_err()
-    if ey > AIM_FIRE_MAX_ERR:
-        return False
-    if ep > AIM_FIRE_MAX_ERR:
-        return False
-    return True
-
-def person_aim_track_ok():
-    """交战中可射：当前框略偏仍可（须本帧有效检出）。"""
-    ok, x, y, w, h = people_get_first()
-    if ok == False:
-        return False
-    ey, ep = person_aim_err()
-    if ey > AIM_TRACK_FIRE_ERR:
-        return False
-    if ep > AIM_TRACK_FIRE_ERR:
-        return False
-    return True
+    if ok:
+        try:
+            if w >= PERSON_FIRE_MIN_W and h >= PERSON_FIRE_MIN_H:
+                return True
+        except Exception:
+            pass
+    if g_track_on:
+        try:
+            if g_track_w >= PERSON_FIRE_MIN_W and g_track_h >= PERSON_FIRE_MIN_H:
+                return True
+        except Exception:
+            return True
+        return True
+    return False
 
 def fire_ir_warn_once():
     """红外示警一次。"""
@@ -878,7 +929,7 @@ def scan_seg_label(qi, target):
 def scan_yaw_abs(tgt, reason):
     """设定极限转速后绝对 yaw_ctrl 到 tgt。返回 (yaw0, yaw1, dt_s)。"""
     gimbal_stop()
-    set_gimbal_speed(SCAN_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     y0 = get_yaw()
     t0 = now_s()
     try:
@@ -889,7 +940,7 @@ def scan_yaw_abs(tgt, reason):
     dt = now_s() - t0
     gimbal_stop()
     log("SCAN yaw_ctrl %.0f -> %.0f (got %.0f) spd=%.0f dt=%.3f | %s" % (
-        y0, tgt, y1, SCAN_YAW_SPEED, dt, reason
+        y0, tgt, y1, GIMBAL_YAW_SPEED, dt, reason
     ))
     return y0, y1, dt
 
@@ -904,7 +955,7 @@ def gimbal_fast_home(reason, keep_scan_pitch=False):
     except Exception:
         pit0 = 0.0
     log("HOME begin yaw=%.0f pitch=%.0f | %s" % (yaw0, pit0, reason))
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     if keep_scan_pitch:
         try:
             gimbal_ctrl.angle_ctrl(0, PITCH_SCAN)
@@ -920,38 +971,77 @@ def gimbal_fast_home(reason, keep_scan_pitch=False):
     gimbal_stop()
     log("HOME done yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
 
+def scan_build_waypoints(y0, y1, step_deg):
+    """
+    从规划角 y0 到 y1 生成绝对角航点列表（不含 y0，含 y1）。
+    步长 step_deg；不读实测 yaw。
+    """
+    pts = []
+    dy = y1 - y0
+    if abs(dy) < 0.01:
+        return pts
+    step = abs(step_deg)
+    if step < 5.0:
+        step = 5.0
+    if dy > 0:
+        y = y0 + step
+        while y < y1 - 0.01:
+            pts.append(y)
+            y = y + step
+        pts.append(y1)
+    else:
+        y = y0 - step
+        while y > y1 + 0.01:
+            pts.append(y)
+            y = y - step
+        pts.append(y1)
+    return pts
+
 def scan_load_segment(qi):
-    """装载第 qi 段大目标角。"""
-    global g_scan_qi, g_scan_target_yaw, g_scan_last_yaw, g_scan_stuck, g_scan_seg_name
+    """装载第 qi 段：规划角 g_scan_planned_yaw → 大目标，生成航点。"""
+    global g_scan_qi, g_scan_target_yaw, g_scan_seg_name
+    global g_scan_waypoints, g_scan_wi
     g_scan_qi = qi
     g_scan_target_yaw = g_scan_queue[qi]
-    g_scan_last_yaw = get_yaw()
-    g_scan_stuck = 0
     g_scan_seg_name = scan_seg_label(qi, g_scan_target_yaw)
+    g_scan_waypoints = scan_build_waypoints(
+        g_scan_planned_yaw, g_scan_target_yaw, SCAN_STEP_DEG
+    )
+    g_scan_wi = 0
     if abs(g_scan_target_yaw) < 0.1:
         fx_recenter()
     else:
         fx_scan_seg(g_scan_seg_name)
-    log("SCAN seg qi=%d %s yaw0=%.0f" % (qi, g_scan_seg_name, g_scan_last_yaw))
+    log(
+        "SCAN seg qi=%d %s plan=%.0f -> %.0f n_wp=%d %s"
+        % (
+            qi, g_scan_seg_name, g_scan_planned_yaw, g_scan_target_yaw,
+            len(g_scan_waypoints), str(g_scan_waypoints)
+        )
+    )
 
 def scan_diag_reset_cycle():
-    """新 SCAN 循环：清诊断计数。"""
+    """新 SCAN 循环：清诊断计数与规划角。"""
     global g_scan_step_i, g_scan_look_ops, g_scan_cycle_look_ops
-    global g_scan_cycle_turns, g_scan_t_after_turn
+    global g_scan_cycle_turns, g_scan_t_after_turn, g_scan_planned_yaw
+    global g_scan_waypoints, g_scan_wi
     g_scan_step_i = 0
     g_scan_look_ops = 0
     g_scan_cycle_look_ops = 0
     g_scan_cycle_turns = 0
     g_scan_t_after_turn = now_s()
+    g_scan_planned_yaw = 0.0
+    g_scan_waypoints = []
+    g_scan_wi = 0
 
 def scan_start_full(reason):
     """从回中开始完整 SCAN 循环。"""
-    global g_scan_queue
+    global g_scan_queue, g_scan_planned_yaw
     mode_ensure_free("scan_start_full")
     g_scan_queue = scan_queue_full_two_rounds()
     person_hit_reset()
     scan_diag_reset_cycle()
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     try:
         gimbal_ctrl.angle_ctrl(0, PITCH_SCAN)
     except Exception:
@@ -961,111 +1051,85 @@ def scan_start_full(reason):
             pass
         gimbal_set_pitch_scan()
     gimbal_set_pitch_scan()
+    g_scan_planned_yaw = 0.0
     g_scan_t_after_turn = now_s()
-    log("SCAN home first yaw=%.0f pitch=%.0f" % (get_yaw(), get_pitch()))
+    log("SCAN home first plan_yaw=0")
     if len(g_scan_queue) <= 0:
         log("SCAN empty queue")
         return
     fx_scan()
     scan_load_segment(0)
     log(
-        "SCAN plan: home -> CW%+.0f -> 0 -> CCW%+.0f -> 0 | step=%.0f look=%d..%d hit_need=%d | %s"
-        % (SCAN_CW, SCAN_CCW, SCAN_STEP_DEG, SCAN_LOOK_OPS, SCAN_LOOK_OPS_MAX, PERSON_HIT_NEED, reason)
+        "SCAN plan: home -> CW%+.0f -> 0 -> CCW%+.0f -> 0 | step=%.0f look=%d hit_need=%d | %s"
+        % (SCAN_CW, SCAN_CCW, SCAN_STEP_DEG, SCAN_LOOK_OPS, PERSON_HIT_NEED, reason)
     )
 
 def scan_look_once():
     """
-    一次固定「查人」操作：单次视觉采样 + 更新 hit。
-    不用 sleep 凑时间；dt_op = 本次采样实际耗时。
-    返回 (locked, person_seen, dt_op)
+    一次查人采样，更新连续 hit。
+    仅 hit≥PERSON_HIT_NEED 时 locked=True（才算发现人）。
+    返回 (found, frame_hit, dt_op)；frame_hit=本帧有框（未达 3 不算发现）。
     """
     global g_scan_look_ops, g_scan_cycle_look_ops
     t0 = now_s()
-    # person_hit_update 内部只采样一次；hit 即当前累计
-    locked = person_hit_update(PERSON_HIT_NEED)
+    found = person_hit_update(PERSON_HIT_NEED)
     dt = now_s() - t0
-    seen = g_person_hit > 0
+    frame_hit = g_person_hit > 0
     g_scan_look_ops = g_scan_look_ops + 1
     g_scan_cycle_look_ops = g_scan_cycle_look_ops + 1
-    # gap_since_turn：距上次转完的墙钟，仅诊断（含主循环 sleep，非我们主动空等）
     gap = 0.0
     if g_scan_t_after_turn > 0.0:
         gap = t0 - g_scan_t_after_turn
-    # 有效检出时带上框尺寸，便于区分真人 / 行李误检
     whs = ""
-    if seen:
+    if frame_hit:
         ok2, px, py, pw, ph = people_get_first()
         if ok2:
             whs = " xy=(%.2f,%.2f) wh=(%.2f,%.2f)" % (px, py, pw, ph)
     log(
-        "SCAN_LOOK step=%d yaw=%.0f seg=%s look_ops=%d hit=%d/%d person=%s "
-        "dt_op=%.3f gap_since_turn=%.3f locked=%s%s"
+        "SCAN_LOOK step=%d yaw=%.0f seg=%s look_ops=%d hit=%d/%d frame=%s "
+        "found=%s dt_op=%.3f gap=%.3f%s"
         % (
             g_scan_step_i, get_yaw(), g_scan_seg_name, g_scan_look_ops,
-            g_person_hit, PERSON_HIT_NEED, str(seen), dt, gap, str(locked), whs
+            g_person_hit, PERSON_HIT_NEED, str(frame_hit), str(found), dt, gap, whs
         )
     )
-    return locked, seen, dt
+    return found, frame_hit, dt
 
 def scan_tick_turn():
     """
-    朝本段大目标走一步 SCAN_STEP_DEG（绝对 yaw_ctrl）。
+    按规划航点执行一步绝对 yaw_ctrl（S1 阻塞到位）；不读实测 yaw 判定。
     返回 (seg_done, did_turn)
-      seg_done: 本段大目标已到
-      did_turn: 本 tick 是否执行了 yaw_ctrl
     """
     global g_scan_step_i, g_scan_look_ops, g_scan_cycle_turns, g_scan_t_after_turn
-    tgt = g_scan_target_yaw
-    yaw0 = get_yaw()
-    err = tgt - yaw0
-    if abs(err) <= YAW_ARRIVE:
+    global g_scan_wi, g_scan_planned_yaw
+    if g_scan_wi >= len(g_scan_waypoints):
         log(
-            "SCAN_SEG_ARRIVE step=%d yaw=%.0f tgt=%.0f look_ops_at_angle=%d | %s"
-            % (g_scan_step_i, yaw0, tgt, g_scan_look_ops, g_scan_seg_name)
+            "SCAN_SEG_DONE step=%d plan=%.0f tgt=%.0f look_ops=%d | %s"
+            % (g_scan_step_i, g_scan_planned_yaw, g_scan_target_yaw, g_scan_look_ops, g_scan_seg_name)
         )
         return True, False
-    step = SCAN_STEP_DEG
-    if step < 5.0:
-        step = 5.0
-    if err > 0:
-        if err > step:
-            nxt = yaw0 + step
-        else:
-            nxt = tgt
-    else:
-        if err < -step:
-            nxt = yaw0 - step
-        else:
-            nxt = tgt
-    if nxt > 250.0:
-        nxt = 250.0
-    if nxt < -250.0:
-        nxt = -250.0
-    # 转之前应已完成 SCAN_LOOK_OPS 次查人（由 tick 保证）
+    nxt = g_scan_waypoints[g_scan_wi]
+    g_scan_wi = g_scan_wi + 1
     look_before = g_scan_look_ops
-    y0, y1, dt_turn = scan_yaw_abs(nxt, "%s step%.0f" % (g_scan_seg_name, step))
+    y0, y1, dt_turn = scan_yaw_abs(nxt, "%s wp" % g_scan_seg_name)
+    g_scan_planned_yaw = nxt
     g_scan_cycle_turns = g_scan_cycle_turns + 1
     g_scan_step_i = g_scan_step_i + 1
     g_scan_t_after_turn = now_s()
+    g_scan_look_ops = 0
+    seg_done = g_scan_wi >= len(g_scan_waypoints)
     log(
-        "SCAN_TURN step=%d yaw %.0f->%.0f plan_nxt=%.0f err0=%.0f "
-        "dt_turn=%.3f look_ops_before=%d need=%d seg=%s"
+        "SCAN_TURN step=%d plan_cmd=%.0f look_ops_before=%d dt_turn=%.3f "
+        "wp=%d/%d seg_done=%s | %s"
         % (
-            g_scan_step_i, y0, y1, nxt, err, dt_turn, look_before, SCAN_LOOK_OPS, g_scan_seg_name
+            g_scan_step_i, nxt, look_before, dt_turn,
+            g_scan_wi, len(g_scan_waypoints), str(seg_done), g_scan_seg_name
         )
     )
-    # 新角位：查人计数从 0 重新计
-    g_scan_look_ops = 0
-    if abs(tgt - y1) <= YAW_ARRIVE:
-        log(
-            "SCAN_SEG_ARRIVE step=%d yaw=%.0f tgt=%.0f | %s"
-            % (g_scan_step_i, y1, tgt, g_scan_seg_name)
-        )
-        return True, True
-    return False, True
+    return seg_done, True
 
 def scan_advance_or_finish():
-    """本段完成：下一段或整圈结束。下一段从 look_ops=0 再观测。"""
+    """本段完成：下一段或整圈结束。"""
     global g_scan_qi, g_scan_look_ops
     gimbal_stop()
     g_scan_look_ops = 0
@@ -1098,6 +1162,7 @@ def set_state(s, reason):
     global g_state, g_state_t0, g_person_miss
     global g_patrol_line_t0, g_fire_count, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_line_ever_ok
+    global g_min_fire_done, g_burst_shots, g_last_shot_t
     old = g_state
     g_state = s
     g_state_t0 = now_s()
@@ -1145,41 +1210,43 @@ def set_state(s, reason):
         mode_ensure_free("lost_before_scan")
         scan_start_full("lost_rescan_full")
 
-    # LOCK = 瞄准：当前框 PID，居中后再 IR → FIRE
+    # LOCK：兼容入口，下一 tick 立刻转 FIRE（不在此只瞄不射）
     if s == STATE_LOCK:
         gimbal_ensure_pitch_scan_soft()
         pid_reset_aim()
         person_hit_reset()
         fx_lock()
-        g_fire_count = 0
-        g_ir_done = False
-        g_fire_phase = FIRE_PHASE_AIM
-        g_phase_t0 = now_s()
         g_person_miss = 0
-        ok, x, y, w, h = people_get_first()
-        if ok == False:
-            x = 0.5
-            y = 0.5
-            w = 0.0
-            h = 0.0
-        log("LOCK target ok=%s xy=(%.2f,%.2f) wh=(%.2f,%.2f)" % (
-            str(ok), x, y, w, h
-        ))
+        if g_track_on == False:
+            ok, x, y, w, h = people_get_first()
+            if ok:
+                track_set(x, y, w, h)
+            else:
+                track_set(0.5, 0.5, 0.2, 0.3)
+        log("LOCK passthrough -> will FIRE track=(%.2f,%.2f)" % (g_track_x, g_track_y))
 
-    # FIRE：射 3s / 停火瞄 3s
+    # FIRE：发现后立即边瞄边射；至少射满 T_FIRE_ON 再允许放弃
     if s == STATE_FIRE:
         mode_ensure_free("enter_FIRE")
+        gimbal_ensure_pitch_scan_soft()
         pid_reset_aim()
-        if g_ir_done:
-            g_fire_phase = FIRE_PHASE_IR_DONE
-        else:
-            g_fire_phase = FIRE_PHASE_AIM
-            fx_lock()
-        g_phase_t0 = now_s()
+        fx_lock()
         g_person_miss = 0
-        log("FIRE enter ir_done=%s on=%.1fs off=%.1fs" % (
-            str(g_ir_done), T_FIRE_ON, T_FIRE_OFF
-        ))
+        g_min_fire_done = False
+        g_fire_count = 0
+        g_burst_shots = 0
+        g_last_shot_t = 0.0
+        if g_track_on == False:
+            track_from_people()
+        g_ir_done = False
+        fire_ir_warn_once()
+        g_fire_phase = FIRE_PHASE_SHOOT
+        g_phase_t0 = now_s()
+        fire_bead_burst_start()
+        log(
+            "FIRE start aim+shoot on=%.1fs off=%.1fs track=(%.2f,%.2f) ir=%s"
+            % (T_FIRE_ON, T_FIRE_OFF, g_track_x, g_track_y, str(g_ir_done))
+        )
 
     # RECOVER：低头找线
     if s == STATE_RECOVER:
@@ -1232,86 +1299,53 @@ def tick_patrol():
         set_state(STATE_SCAN, "follow_time_up")
 
 def scan_look_should_keep():
-    """
-    本角位是否继续查人（不转）：
-      look < 5：继续
-      look 已满 5 且 hit 在 (0, need) 之间：再延，最多到 8
-      look >= 8 或 hit==0 且已满 5：不再查，该转
-    """
-    need = PERSON_HIT_NEED
-    if need < 1:
-        need = 1
-    lo_min = SCAN_LOOK_OPS
-    if lo_min < 1:
-        lo_min = 1
-    lo_max = SCAN_LOOK_OPS_MAX
-    if lo_max < lo_min:
-        lo_max = lo_min
-    if g_scan_look_ops < lo_min:
-        return True
-    if g_scan_look_ops >= lo_max:
-        return False
-    # 5 <= look < 8：若已有部分连续 hit，再等几帧凑满 need
-    if g_person_hit > 0 and g_person_hit < need:
-        return True
-    return False
+    """本角位是否继续查人：look_ops < SCAN_LOOK_OPS 则继续，满 5 则应转角。"""
+    lo = SCAN_LOOK_OPS
+    if lo < 1:
+        lo = 1
+    return g_scan_look_ops < lo
 
 def tick_scan_common():
     """
-    SCAN 调度（固定操作，无 sleep）：
-      LOOK：每 tick 1 次查人
-            任意时刻 hit 连续 >=3 → 立刻 LOCK（可第 3 次就进，不等满 5）
-            无人：满 5 次转下一角
-            满 5 时 0<hit<3：再延到最多 8 次
-      TURN：本角放弃 → 45° 下一步
-      整圈无人：有线 → PATROL；无线 → 原地再 SCAN（见 behavior-spec）
+    SCAN（behavior-spec）：
+      每角最多 SCAN_LOOK_OPS 次查人；
+      仅 hit≥PERSON_HIT_NEED 才算发现 → LOCK；
+      hit 1～2 不算发现，满 5 次转下一角。
     """
     global g_scan_look_ops
     chassis_halt()
 
-    # 超时保护：回中找线；无线仍会再 SCAN
-    if state_age() >= T_SCAN_MAX:
-        log("SCAN timeout age=%.1f -> RECOVER" % state_age())
-        scan_log_cycle_summary("timeout")
-        gimbal_stop()
-        set_state(STATE_RECOVER, "scan_timeout")
-        return
-
-    # ----- LOOK 相位：先查人；够 hit 立即 LOCK，与是否满 5 无关 -----
+    # ----- LOOK：未满 5 次则采样 -----
     if scan_look_should_keep():
-        locked, seen, dt_look = scan_look_once()
-        if locked:
-            # 例：头 3 次全 hit → look_ops=3 即进，不会拖到 5
+        found, frame_hit, dt_look = scan_look_once()
+        # 唯一进 LOCK 条件：连续 hit 已达门槛（found）
+        if found and person_found():
             gimbal_stop()
+            track_from_people()
             log(
-                "SCAN person LOCK early_ok step=%d look_ops=%d hit=%d need=%d (min_look=%d)"
-                % (
-                    g_scan_step_i, g_scan_look_ops, g_person_hit, PERSON_HIT_NEED,
-                    SCAN_LOOK_OPS
-                )
+                "SCAN FOUND hit=%d look_ops=%d step=%d track=(%.2f,%.2f) -> FIRE now"
+                % (g_person_hit, g_scan_look_ops, g_scan_step_i, g_track_x, g_track_y)
             )
-            set_state(STATE_LOCK, "person_on_scan")
+            engage_fire_immediate("person_on_scan")
             return
-        # 未 LOCK：未满 5 / 部分 hit 需延 → 继续 LOOK；否则 TURN
         if scan_look_should_keep():
             return
+        # 刚满 5 次且未 found → 下面 TURN
 
-    # ----- TURN 相位：本角观测结束仍未 LOCK -----
-    if g_person_hit > 0:
+    # ----- TURN：本角 5 次内未 hit≥3，放弃本角（含仅 hit1～2）-----
+    if g_person_hit > 0 and g_person_hit < PERSON_HIT_NEED:
         log(
-            "SCAN look give_up step=%d look_ops=%d hit=%d need=%d (max=%d) -> turn"
-            % (g_scan_step_i, g_scan_look_ops, g_person_hit, PERSON_HIT_NEED, SCAN_LOOK_OPS_MAX)
+            "SCAN no-found hit=%d<%d look_ops=%d -> next angle"
+            % (g_person_hit, PERSON_HIT_NEED, g_scan_look_ops)
         )
     person_hit_reset()
     seg_done, did_turn = scan_tick_turn()
     if did_turn == False and seg_done == False:
         return
     if seg_done == False:
-        # 已转到新角，look_ops 已在 scan_tick_turn 清 0
         return
 
-    # 本段大目标已到（可能本 tick 刚转到位，或原本已在目标）
-    log("SCAN seg done %s yaw=%.0f step=%d" % (g_scan_seg_name, get_yaw(), g_scan_step_i))
+    log("SCAN seg done %s plan_step=%d" % (g_scan_seg_name, g_scan_step_i))
     adv = scan_advance_or_finish()
     if adv == "next":
         person_hit_reset()
@@ -1339,97 +1373,48 @@ def tick_lost_scan():
     tick_scan_common()
 
 def tick_lock():
-    """
-    锁目标·接敌：当前框 PID；可射 → IR → FIRE。
-    miss 超过 3 → 整圈 SCAN。
-    """
-    global g_fire_phase, g_phase_t0
+    """兼容：若落入 LOCK，立刻转 FIRE 边瞄边射。"""
     chassis_halt()
-    person_track_update()
-    aim_pid_track()
-
-    if person_confirmed_lost():
-        log("LOCK lost miss=%d -> SCAN" % g_person_miss)
-        leave_combat_to_rescan("lock_lost")
-        return
-
-    if g_ir_done == False and state_age() >= T_LOCK_AIM_MAX:
-        ok, x, y, w, h = people_get_first()
-        log("LOCK acquire timeout xy=(%.2f,%.2f) -> rescan" % (x, y))
-        leave_combat_to_rescan("lock_timeout")
-        return
-
-    if g_ir_done == False and state_age() >= T_AIM_BEFORE_IR:
-        if person_aim_centered() == False:
-            return
-        if person_fire_ok() == False:
-            return
-        fire_ir_warn_once()
-        if g_ir_done:
-            g_fire_phase = FIRE_PHASE_IR_DONE
-            g_phase_t0 = now_s()
-            ok, x, y, w, h = people_get_first()
-            log("LOCK engage xy=(%.2f,%.2f) -> FIRE" % (x, y))
-            set_state(STATE_FIRE, "engage")
+    if g_track_on == False:
+        track_from_people()
+    engage_fire_immediate("from_lock")
 
 def tick_fire():
     """
-    锁目标·交战（behavior-spec）：
-      始终当前框 PID；
-      射击段 T_FIRE_ON：瞄准+射；
-      停火段 T_FIRE_OFF：只瞄准；
-      miss>3 → 立刻 SCAN。
+    边瞄准边射击：
+      SHOOT 3s → HOLD 3s → SHOOT …
+      未完成首段 3s 射击前不得因 miss 放弃。
     """
-    global g_fire_phase, g_phase_t0
+    global g_fire_phase, g_phase_t0, g_min_fire_done
     chassis_halt()
     person_track_update()
-
-    if person_confirmed_lost():
-        log("FIRE lost miss=%d -> SCAN" % g_person_miss)
-        leave_combat_to_rescan("fire_lost")
-        return
-
     aim_pid_track()
 
-    # 尚未 IR
-    if g_ir_done == False:
-        if state_age() >= T_AIM_BEFORE_IR:
-            if person_fire_ok() == False:
-                return
-            if person_aim_centered() == False and person_aim_track_ok() == False:
-                return
-            fire_ir_warn_once()
-            if g_ir_done == False:
-                return
-            g_fire_phase = FIRE_PHASE_SHOOT
-            g_phase_t0 = now_s()
-            fire_bead_burst_start()
+    if person_confirmed_lost():
+        log("FIRE give_up miss=%d min_fire_done=%s -> SCAN" % (
+            g_person_miss, str(g_min_fire_done)
+        ))
+        leave_combat_to_rescan("fire_give_up")
         return
 
-    # IR 刚完成：进入射击段
-    if g_fire_phase == FIRE_PHASE_IR_DONE:
-        if person_fire_ok() == False:
-            return
-        if person_aim_track_ok() == False:
-            return
+    if g_fire_phase == FIRE_PHASE_AIM or g_fire_phase == FIRE_PHASE_IR_DONE:
         g_fire_phase = FIRE_PHASE_SHOOT
         g_phase_t0 = now_s()
         fire_bead_burst_start()
         return
 
-    # 射击段 3s
     if g_fire_phase == FIRE_PHASE_SHOOT:
         if phase_age() < T_FIRE_ON:
             fire_bead_burst_tick()
             return
         fire_bead_burst_stop()
+        g_min_fire_done = True
         fx_fire_wait_led()
         g_fire_phase = FIRE_PHASE_HOLD
         g_phase_t0 = now_s()
-        log("FIRE hold aim-only %.1fs" % T_FIRE_OFF)
+        log("FIRE first/seg done min_fire_done=1 hold %.1fs" % T_FIRE_OFF)
         return
 
-    # 停火段 3s：只瞄准（上面已 aim_pid_track）
     if g_fire_phase == FIRE_PHASE_HOLD:
         if phase_age() >= T_FIRE_OFF:
             g_fire_phase = FIRE_PHASE_SHOOT
@@ -1449,8 +1434,13 @@ def tick_recover():
     except Exception:
         gimbal_set_pitch_line()
     line_update()
-    if person_hit_update(PERSON_HIT_NEED):
-        set_state(STATE_LOCK, "person_on_recover")
+    # 与 SCAN 相同：仅连续 hit≥PERSON_HIT_NEED 才算发现
+    if person_hit_update(PERSON_HIT_NEED) and person_found():
+        track_from_people()
+        log("RECOVER FOUND hit=%d track=(%.2f,%.2f) -> FIRE now" % (
+            g_person_hit, g_track_x, g_track_y
+        ))
+        engage_fire_immediate("person_on_recover")
         return
     if line_stable_true():
         log("RECOVER line -> PATROL")
@@ -1467,7 +1457,7 @@ def tick_recover():
 def setup():
     log("setup begin")
     mode_ensure_free("setup")
-    set_gimbal_speed(HOME_YAW_SPEED)
+    set_gimbal_speed(GIMBAL_YAW_SPEED)
     gimbal_pose_line()
     vision_ctrl.enable_detection(rm_define.vision_detection_people)
     vision_ctrl.enable_detection(rm_define.vision_detection_line)
@@ -1482,14 +1472,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.27.0 fire_on=%.1f fire_off=%.1f hit=%d miss>%d" % (
-        T_FIRE_ON, T_FIRE_OFF, PERSON_HIT_NEED, PERSON_MISS_NEED
+    log("setup done v1.32.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+        PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.27.0 stamp=2026-08-05 00:10:00")
+    print("# LINE_GUARD_VERSION=1.32.0 stamp=2026-08-06 18:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")

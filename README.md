@@ -7,8 +7,9 @@
 - **不需要** Mac 与 S1 实时传数据；功能闭环全部在车上完成  
 
 > **行为规格（改代码必读）：** [`docs/behavior-spec.md`](docs/behavior-spec.md)  
-> 实现备忘：[`docs/design-notes.md`](docs/design-notes.md)  
-> 车载程序：`onboard/line_guard.py`（单文件粘贴进 App 实验室）
+> **助手纪律：** [`AGENTS.md`](AGENTS.md)（规格未写禁止加进代码）  
+> 实现备忘 / 灯光含义：[`docs/design-notes.md`](docs/design-notes.md)  
+> 车载程序：`onboard/line_guard.py`
 
 仓库：<https://github.com/dead-lee/s1-line-guard>
 
