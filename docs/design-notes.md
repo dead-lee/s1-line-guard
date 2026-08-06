@@ -14,10 +14,10 @@
 
 | 观感 | 效果 | 含义 |
 |------|------|------|
-| **绿常亮** | always_on | **PATROL 巡线** 或 **RECOVER 找线**（跟线/找线统一绿） |
+| **绿常亮** | always_on | **PATROL 巡线** |
 | **蓝闪 + 云台顶跑马** | flash + marquee | **SCAN** 扫人 / 换扫视大段 |
 | **黄呼吸** | breath | 云台回中 / 扫到约 0° 段 |
-| **红闪**（无枪口灯） | flash | **交战中未射**：发现人 / IR / 停火只瞄（3s） |
+| **红闪**（无枪口灯） | flash | **交战中未射**：进 FIRE / IR / 停火只瞄（3s） |
 | **红闪 + 枪口灯亮** | flash + gun | **FIRE 射击段**（约 3s 在射水弹） |
 | **紫闪** | flash | **确认丢人**，即将整圈 SCAN 重扫 |
 
@@ -32,9 +32,9 @@
 
 ### 控制权
 
-1. 进入 SCAN / LOCK / FIRE 前：底盘 `stop`，`robot_mode_free`。  
+1. 进入 SCAN / FIRE 前：底盘 `stop`，`robot_mode_free`。  
 2. PATROL：`robot_mode_chassis_follow` + 官方 RmList 循线。  
-3. 离开 FIRE/LOCK 前：`gun_ctrl.stop` 等停火。
+3. 离开 FIRE 前：`gun_ctrl.stop` 等停火。
 
 ### 阻塞与 sleep
 
@@ -44,7 +44,7 @@
 
 ### 线 / 人
 
-- 线：必须 `RmList(get_line_detection_info())`，`len==42` 且点数有效，`cx=[19]`。  
+- 线：必须 `RmList(get_line_detection_info())`，`len>=42` 且点数有效；控制用近/中/远融合 cx（远点约 `[19]`）。  
 - 人：`enable_detection(people)`；轮询 `get_people_detection_info` 或官方 `cond_wait`（阻塞，不宜插在步进 SCAN 中途单独依赖）。  
 - 行人误检（沙发/行李）官方无更好过滤器；几何启发式不可靠。
 

@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.32.5 stamp=2026-08-06 22:00:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.33.0 stamp=2026-08-06 22:30:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -70,10 +70,8 @@ T_FIRE_ON = 3.0                 # 射击段：边瞄边射
 T_FIRE_OFF = 3.0                # 停火段：只瞄
 FIRE_PULSE_INTERVAL = 0.18
 FIRE_BEADS_PER_PULSE = 2
-FIRE_USE_PULSE = True
 
 ENABLE_FIRE = True
-FORCE_NO_LINE = False
 FLASH_HZ = 3
 
 # =============================================================================
@@ -82,10 +80,7 @@ FLASH_HZ = 3
 STATE_INIT = 0
 STATE_PATROL = 1
 STATE_SCAN = 2
-STATE_LOCK = 3
-STATE_FIRE = 4
-STATE_LOST_SCAN = 5
-STATE_RECOVER = 6
+STATE_FIRE = 3
 
 # FIRE 内节奏：射 3s ↔ 停火只瞄 3s（见 behavior-spec）
 FIRE_PHASE_SHOOT = 0            # 边瞄边射
@@ -97,7 +92,6 @@ g_person_miss = 0
 g_person_hit = 0
 g_patrol_line_t0 = 0.0
 g_aim_t_prev = 0.0
-g_fire_count = 0
 g_fire_phase = FIRE_PHASE_SHOOT
 g_phase_t0 = 0.0
 g_ir_done = False
@@ -113,14 +107,12 @@ g_line_cx = 0.5
 g_line_err = 0.0
 g_line_yaw_spd = 0.0
 g_line_spd = 0.0
-g_line_info_len = 0
 g_line_pts = 0
 g_line_ever_ok = False
 g_line_pid = None
-g_line_look_done = False
 g_line_cx_smooth = 0.5
 g_line_diverge = 0.0            # |远点cx-近点cx|，弯道判据
-# 锁定后记忆框（FOUND 时建立；有检出则刷新；无检出仍用于瞄准/开火）
+# 记忆框：FOUND 建立；有检出刷新；无检出仍用于瞄准/开火
 g_track_on = False
 g_track_x = 0.5
 g_track_y = 0.5
@@ -128,15 +120,14 @@ g_track_w = 0.2
 g_track_h = 0.3
 g_min_fire_done = False         # 是否已完成至少一整段 3s 射击
 
-# SCAN 队列与当前段（规划角步进，不读实测 yaw 做到达判定）
+# SCAN 队列与当前段（规划角步进）
 g_scan_queue = []
 g_scan_qi = 0
 g_scan_target_yaw = 0.0
-g_scan_planned_yaw = 0.0        # 规划上当前角（上一步 yaw_ctrl 指令目标）
-g_scan_waypoints = []           # 本段待转的绝对角序列
-g_scan_wi = 0                   # 下一航点下标
+g_scan_planned_yaw = 0.0
+g_scan_waypoints = []
+g_scan_wi = 0
 g_scan_seg_name = ""
-g_mode_tag = "free"
 g_scan_step_i = 0
 g_scan_look_ops = 0
 g_scan_cycle_look_ops = 0
@@ -157,14 +148,8 @@ def state_name(s):
         return "PATROL"
     if s == STATE_SCAN:
         return "SCAN"
-    if s == STATE_LOCK:
-        return "LOCK"
     if s == STATE_FIRE:
         return "FIRE"
-    if s == STATE_LOST_SCAN:
-        return "LOST_SCAN"
-    if s == STATE_RECOVER:
-        return "RECOVER"
     return "S?" + str(s)
 
 def log(msg):
@@ -247,9 +232,8 @@ def leds_off():
 #  | 发现人 / IR / 停火瞄 | 红闪      | flash             | 关     |
 #  | FIRE 射击段(射3s) | 红闪         | flash 很快        | 开     |
 #  | 确认丢人→重扫前   | 紫闪         | flash             | 关     |
-#  | RECOVER 找线      | 绿常亮       | always_on（同巡线）| 关     |
 #
-# 红闪无枪口=交战中未射（发现/IR/停火瞄）；红闪+枪口=正在射；紫闪=丢人；绿=巡线/找线。
+# 红闪无枪口=交战未射；红闪+枪口=正在射；紫闪=丢人；绿=巡线。
 # -----------------------------------------------------------------------------
 def leds_set(r, g, b, effect, flash_hz, top_marquee=False, gun_on=False):
     leds_off()
@@ -293,32 +277,27 @@ def fx_recenter():
     leds_set(255, 200, 0, rm_define.effect_breath, FLASH_HZ)
     sfx(rm_define.media_sound_gimbal_rotate)
 
-def fx_lock():
-    """红闪 = 发现人，报警并进入瞄准/交战（与「仅瞄准」区分无关，直接报警色）。"""
+def fx_combat():
+    """红闪 = 交战（进 FIRE / 报警）。"""
     leds_set(255, 0, 0, rm_define.effect_flash, 6)
     sfx(rm_define.media_sound_recognize_success)
 
 def fx_fire_ir_led():
-    """红闪 = 红外示警（仍属交战报警，无枪口灯）。"""
+    """红闪 = 红外示警（无枪口灯）。"""
     leds_set(255, 0, 0, rm_define.effect_flash, 7)
 
 def fx_fire_burst_led():
-    """红闪+枪口灯 = FIRE 射击段（约 3s 在射水弹）。"""
+    """红闪+枪口灯 = FIRE 射击段。"""
     leds_set(255, 0, 0, rm_define.effect_flash, 8, gun_on=True)
 
 def fx_fire_wait_led():
-    """红闪无枪口 = FIRE 停火段（约 3s 只瞄不射；与发现人/IR 同红闪）。"""
+    """红闪无枪口 = FIRE 停火只瞄。"""
     leds_set(255, 0, 0, rm_define.effect_flash, 6)
 
 def fx_person_lost():
     """紫闪 = 确认丢人，即将整圈重扫。"""
     leds_set(200, 0, 255, rm_define.effect_flash, 5)
     sfx(rm_define.media_sound_attacked)
-
-def fx_recover():
-    """绿常亮 = RECOVER 找线（与 PATROL 同色：都在找/跟线）。"""
-    leds_set(0, 255, 0, rm_define.effect_always_on, FLASH_HZ)
-    sfx(rm_define.media_sound_solmization_1G)
 
 # =============================================================================
 # VISION — 行人检测与防抖
@@ -391,31 +370,22 @@ def people_get_first():
         return False, xf, yf, wf, hf
     return True, xf, yf, wf, hf
 
-def people_seen():
-    ok, x, y, w, h = people_get_first()
-    return ok
-
 def person_hit_reset():
     global g_person_hit
     g_person_hit = 0
 
 def person_hit_update(need):
-    """
-    连续 need 帧有效检出才确认「发现人」。
-    hit 为 1..need-1 只累计，不算发现，不触发 LOCK/交战。
-    """
+    """连续 need 帧有效检出 → 确认发现人。"""
     global g_person_hit
     if need < 1:
         need = 1
-    if people_seen():
+    ok, x, y, w, h = people_get_first()
+    if ok:
         g_person_hit = g_person_hit + 1
     else:
         g_person_hit = 0
     return g_person_hit >= need
 
-def person_found():
-    """当前是否已达「发现人」门槛（hit≥PERSON_HIT_NEED）。"""
-    return g_person_hit >= PERSON_HIT_NEED
 
 def track_clear():
     global g_track_on, g_track_x, g_track_y, g_track_w, g_track_h
@@ -450,10 +420,7 @@ def track_from_people():
     return False
 
 def person_track_update():
-    """
-    LOCK/FIRE：有检出则刷新记忆框并清 miss；
-    无检出则 miss+1，记忆框保留（静态/闪断仍继续瞄）。
-    """
+    """FIRE：有检出刷新记忆并清 miss；无检出 miss+1，记忆框保留。"""
     global g_person_miss
     if track_from_people():
         g_person_miss = 0
@@ -482,18 +449,11 @@ def leave_combat_to_rescan(reason):
     set_state(STATE_SCAN, "rescan_after_%s" % reason)
 
 def engage_fire_immediate(reason):
-    """
-    发现人后立即进入 FIRE：边瞄边射（不经长时间只瞄的 LOCK）。
-    """
+    """发现人后立即进入 FIRE：边瞄边射。"""
     log("ENGAGE immediate FIRE | %s track=(%.2f,%.2f)" % (
         reason, g_track_x, g_track_y
     ))
     set_state(STATE_FIRE, reason)
-
-def leave_combat_to_recover(reason):
-    """停火后去找线（无冷却，可立刻再被 SCAN 认人）。"""
-    fire_stop()
-    set_state(STATE_RECOVER, reason)
 
 def aim_pid_dt():
     """PID 微分用实际步间隔（非 sleep）；首帧用 0.05。"""
@@ -651,14 +611,8 @@ def line_read():
     return False, 0.5, n, pts
 
 def line_update():
-    global g_line_hit, g_line_miss, g_line_cx, g_line_info_len, g_line_pts, g_line_ever_ok
-    if FORCE_NO_LINE:
-        g_line_miss = g_line_miss + 1
-        g_line_hit = 0
-        g_line_pts = 0
-        return
+    global g_line_hit, g_line_miss, g_line_cx, g_line_pts, g_line_ever_ok
     ok, cx, n, pts = line_read()
-    g_line_info_len = n
     g_line_pts = pts
     if ok:
         g_line_cx = cx
@@ -699,8 +653,7 @@ def line_pid_init():
         log("LINE PIDCtrl unavailable, P only")
 
 def line_look_down_official():
-    """低头到 PITCH_LINE：先水平再相对 down(-PITCH_LINE)，失败则绝对 pitch_ctrl。"""
-    global g_line_look_done
+    """低头到 PITCH_LINE：先水平再相对 down，失败则绝对 pitch_ctrl。"""
     down_deg = -PITCH_LINE
     if down_deg < 0:
         down_deg = -down_deg
@@ -718,12 +671,10 @@ def line_look_down_official():
         pass
     try:
         gimbal_ctrl.rotate_with_degree(rm_define.gimbal_down, down_deg)
-        g_line_look_done = True
         log("LINE look_down relative %d deg (pitch_line=%d)" % (down_deg, PITCH_LINE))
     except Exception:
         try:
             gimbal_ctrl.pitch_ctrl(PITCH_LINE)
-            g_line_look_done = True
             log("LINE look_down fallback pitch=%d" % PITCH_LINE)
         except Exception:
             log("LINE look_down FAIL")
@@ -731,13 +682,6 @@ def line_look_down_official():
 # =============================================================================
 # ACTUATORS — 云台姿态、模式、循线步进、射击
 # =============================================================================
-def gimbal_set_pitch_line():
-    set_gimbal_speed(GIMBAL_YAW_SPEED)
-    try:
-        gimbal_ctrl.pitch_ctrl(PITCH_LINE)
-    except Exception:
-        pass
-
 def gimbal_set_pitch_scan():
     set_gimbal_speed(GIMBAL_YAW_SPEED)
     try:
@@ -796,8 +740,7 @@ def set_gimbal_speed(spd):
         pass
 
 def mode_ensure_free(reason):
-    """SCAN/LOCK/FIRE 等：停底盘 + robot_mode_free，云台独立。"""
-    global g_mode_tag
+    """SCAN/FIRE 等：停底盘 + robot_mode_free，云台独立。"""
     chassis_halt()
     try:
         gimbal_ctrl.rotate_with_speed(0, 0)
@@ -808,14 +751,11 @@ def mode_ensure_free(reason):
     except Exception:
         pass
     robot_ctrl.set_mode(rm_define.robot_mode_free)
-    g_mode_tag = "free"
     log("MODE free | %s" % reason)
 
 def mode_ensure_line_follow(reason):
     """PATROL：chassis_follow，云台带动底盘循线。"""
-    global g_mode_tag
     robot_ctrl.set_mode(rm_define.robot_mode_chassis_follow)
-    g_mode_tag = "chassis_follow"
     log("MODE chassis_follow | %s" % reason)
 
 def _line_blend01(v, lo, hi):
@@ -849,9 +789,8 @@ def line_follow_step():
     急弯近点主导、强制降速，减少转错弯与冲出线。
     """
     global g_line_cx, g_line_err, g_line_yaw_spd, g_line_spd
-    global g_line_info_len, g_line_pts, g_line_cx_smooth
+    global g_line_pts, g_line_cx_smooth
     ok, cx, n, pts = line_read()
-    g_line_info_len = n
     g_line_pts = pts
     if ok == False:
         g_line_yaw_spd = 0.0
@@ -947,7 +886,7 @@ def person_fire_ok():
 
 def fire_ir_warn_once():
     """红外示警一次。"""
-    global g_fire_count, g_ir_done
+    global g_ir_done
     if g_ir_done:
         return
     if person_fire_ok() == False:
@@ -970,12 +909,11 @@ def fire_ir_warn_once():
         gun_ctrl.set_fire_count(1)
         gun_ctrl.fire_once()
         log("IR_WARN fallback gun")
-    g_fire_count = g_fire_count + 1
     g_ir_done = True
 
 def fire_bead_burst_start():
-    """射击段开始：脉冲 fire_once 或 continuous（须当前帧可射）。"""
-    global g_last_shot_t, g_burst_shots, g_fire_count
+    """射击段开始：脉冲 fire_once（须当前可射）。"""
+    global g_last_shot_t, g_burst_shots
     if ENABLE_FIRE == False:
         log("FIRE_ON skip ENABLE_FIRE=0")
         return
@@ -985,21 +923,11 @@ def fire_bead_burst_start():
     fx_fire_burst_led()
     g_last_shot_t = 0.0
     g_burst_shots = 0
-    if FIRE_USE_PULSE == False:
-        try:
-            gun_ctrl.set_fire_count(FIRE_BEADS_PER_PULSE)
-            gun_ctrl.fire_continuous()
-            g_last_shot_t = now_s()
-            g_burst_shots = 1
-            log("FIRE_ON continuous %.1fs" % T_FIRE_ON)
-        except Exception:
-            log("FIRE continuous FAIL")
-        return
     fire_bead_pulse_once()
     log("FIRE_ON pulse interval=%.2fs for %.1fs" % (FIRE_PULSE_INTERVAL, T_FIRE_ON))
 
 def fire_bead_pulse_once():
-    global g_last_shot_t, g_burst_shots, g_fire_count
+    global g_last_shot_t, g_burst_shots
     if ENABLE_FIRE == False:
         return
     if person_fire_ok() == False:
@@ -1013,14 +941,13 @@ def fire_bead_pulse_once():
         gun_ctrl.set_fire_count(n)
         gun_ctrl.fire_once()
         g_burst_shots = g_burst_shots + 1
-        g_fire_count = g_fire_count + 1
         g_last_shot_t = now_s()
         log("FIRE pulse #%d" % g_burst_shots)
     except Exception:
         log("FIRE pulse fail")
 
 def fire_bead_burst_tick():
-    """射击段内补发；须当前帧 person_fire_ok。"""
+    """射击段内按间隔补发脉冲。"""
     if ENABLE_FIRE == False:
         return
     if person_fire_ok() == False:
@@ -1028,8 +955,6 @@ def fire_bead_burst_tick():
             gun_ctrl.stop()
         except Exception:
             pass
-        return
-    if FIRE_USE_PULSE == False:
         return
     if g_last_shot_t <= 0.0:
         fire_bead_pulse_once()
@@ -1294,13 +1219,9 @@ def scan_log_cycle_summary(where):
 # STATE MACHINE — 入口与各态 tick
 # =============================================================================
 def set_state(s, reason):
-    """
-    状态切换：
-      非 PATROL → free 模式
-      PATROL → chassis_follow + 低头循线
-    """
+    """状态切换：非 PATROL → free；PATROL → chassis_follow + 低头循线。"""
     global g_state, g_state_t0, g_person_miss
-    global g_patrol_line_t0, g_fire_count, g_fire_phase, g_phase_t0
+    global g_patrol_line_t0, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_line_ever_ok
     global g_min_fire_done, g_burst_shots, g_last_shot_t
     old = g_state
@@ -1314,7 +1235,6 @@ def set_state(s, reason):
         fire_stop()
         mode_ensure_free("enter_%s" % state_name(s))
 
-    # PATROL：官方循线准备
     if s == STATE_PATROL:
         fire_stop()
         mode_ensure_free("patrol_before_pose")
@@ -1346,37 +1266,16 @@ def set_state(s, reason):
     if s == STATE_SCAN:
         scan_start_full("normal_scan")
 
-    # LOST_SCAN：同完整 SCAN
-    if s == STATE_LOST_SCAN:
-        pid_reset_aim()
-        fx_person_lost()
-        mode_ensure_free("lost_before_scan")
-        scan_start_full("lost_rescan_full")
 
-    # LOCK：兼容入口，下一 tick 立刻转 FIRE（不在此只瞄不射）
-    if s == STATE_LOCK:
-        gimbal_ensure_pitch_scan_soft()
-        pid_reset_aim()
-        person_hit_reset()
-        fx_lock()
-        g_person_miss = 0
-        if g_track_on == False:
-            ok, x, y, w, h = people_get_first()
-            if ok:
-                track_set(x, y, w, h)
-            else:
-                track_set(0.5, 0.5, 0.2, 0.3)
-        log("LOCK passthrough -> will FIRE track=(%.2f,%.2f)" % (g_track_x, g_track_y))
 
     # FIRE：发现后立即边瞄边射；至少射满 T_FIRE_ON 再允许放弃
     if s == STATE_FIRE:
         mode_ensure_free("enter_FIRE")
         gimbal_ensure_pitch_scan_soft()
         pid_reset_aim()
-        fx_lock()
+        fx_combat()
         g_person_miss = 0
         g_min_fire_done = False
-        g_fire_count = 0
         g_burst_shots = 0
         g_last_shot_t = 0.0
         if g_track_on == False:
@@ -1391,18 +1290,9 @@ def set_state(s, reason):
             % (T_FIRE_ON, T_FIRE_OFF, g_track_x, g_track_y, str(g_ir_done))
         )
 
-    # RECOVER：低头找线
-    if s == STATE_RECOVER:
-        pid_reset_aim()
-        gimbal_pose_line()
-        fx_recover()
-        g_line_hit = 0
-        g_line_miss = 0
-        person_hit_reset()
-        log("RECOVER find line pitch=%.0f" % get_pitch())
 
 def tick_patrol():
-    """蓝线巡线 T_MOVE 秒后进 SCAN；巡线阶段不认人、不进 LOCK。"""
+    """蓝线巡线 T_MOVE 秒后进 SCAN；巡线阶段不认人。"""
     global g_patrol_line_t0
     line_update()
     if line_stable_false():
@@ -1452,7 +1342,7 @@ def tick_scan_common():
     """
     SCAN（behavior-spec）：
       每角最多 SCAN_LOOK_OPS 次查人；
-      仅 hit≥PERSON_HIT_NEED 才算发现 → LOCK；
+      仅 hit≥PERSON_HIT_NEED 才算发现 → FIRE；
       hit 1～2 不算发现，满 5 次转下一角。
     """
     global g_scan_look_ops
@@ -1461,8 +1351,8 @@ def tick_scan_common():
     # ----- LOOK：未满 5 次则采样 -----
     if scan_look_should_keep():
         found, frame_hit, dt_look = scan_look_once()
-        # 唯一进 LOCK 条件：连续 hit 已达门槛（found）
-        if found and person_found():
+        # 唯一进 FIRE 条件：连续 hit 已达门槛
+        if found:
             gimbal_stop()
             track_from_people()
             log(
@@ -1512,16 +1402,6 @@ def tick_scan_common():
 def tick_scan():
     tick_scan_common()
 
-def tick_lost_scan():
-    tick_scan_common()
-
-def tick_lock():
-    """兼容：若落入 LOCK，立刻转 FIRE 边瞄边射。"""
-    chassis_halt()
-    if g_track_on == False:
-        track_from_people()
-    engage_fire_immediate("from_lock")
-
 def tick_fire():
     """
     边瞄准边射击：
@@ -1560,33 +1440,6 @@ def tick_fire():
             log("FIRE shoot again %.1fs" % T_FIRE_ON)
         return
 
-def tick_recover():
-    """低头找线；有线→PATROL；无线→原地 SCAN（反复，见 behavior-spec）。"""
-    fire_stop()
-    chassis_halt()
-    gimbal_stop()
-    try:
-        if get_pitch() > (PITCH_LINE + 8):
-            gimbal_set_pitch_line()
-    except Exception:
-        gimbal_set_pitch_line()
-    line_update()
-    # 与 SCAN 相同：仅连续 hit≥PERSON_HIT_NEED 才算发现
-    if person_hit_update(PERSON_HIT_NEED) and person_found():
-        track_from_people()
-        log("RECOVER FOUND hit=%d track=(%.2f,%.2f) -> FIRE now" % (
-            g_person_hit, g_track_x, g_track_y
-        ))
-        engage_fire_immediate("person_on_recover")
-        return
-    if line_stable_true():
-        log("RECOVER line -> PATROL")
-        set_state(STATE_PATROL, "line_found")
-        return
-    if line_stable_false() and state_age() >= 2.0:
-        log("RECOVER no line -> SCAN (repeat until line)")
-        set_state(STATE_SCAN, "recover_no_line")
-        return
 
 # =============================================================================
 # ENTRY — 启动与主循环
@@ -1609,14 +1462,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.32.5 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.33.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.32.5 stamp=2026-08-06 22:00:00")
+    print("# LINE_GUARD_VERSION=1.33.0 stamp=2026-08-06 22:30:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
@@ -1625,14 +1478,8 @@ def start():
             tick_patrol()
         elif g_state == STATE_SCAN:
             tick_scan()
-        elif g_state == STATE_LOST_SCAN:
-            tick_lost_scan()
-        elif g_state == STATE_LOCK:
-            tick_lock()
         elif g_state == STATE_FIRE:
             tick_fire()
-        elif g_state == STATE_RECOVER:
-            tick_recover()
         else:
             log("bad state")
             set_state(STATE_PATROL, "bad_state")
