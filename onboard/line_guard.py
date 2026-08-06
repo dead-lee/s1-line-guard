@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.32.4 stamp=2026-08-06 21:30:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.32.5 stamp=2026-08-06 22:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -87,10 +87,9 @@ STATE_FIRE = 4
 STATE_LOST_SCAN = 5
 STATE_RECOVER = 6
 
-FIRE_PHASE_AIM = 0
-FIRE_PHASE_IR_DONE = 1
-FIRE_PHASE_SHOOT = 2            # 射击段：瞄准+射
-FIRE_PHASE_HOLD = 3             # 停火段：只瞄准
+# FIRE 内节奏：射 3s ↔ 停火只瞄 3s（见 behavior-spec）
+FIRE_PHASE_SHOOT = 0            # 边瞄边射
+FIRE_PHASE_HOLD = 1             # 只瞄不射
 
 g_state = STATE_INIT
 g_state_t0 = 0.0
@@ -99,7 +98,7 @@ g_person_hit = 0
 g_patrol_line_t0 = 0.0
 g_aim_t_prev = 0.0
 g_fire_count = 0
-g_fire_phase = FIRE_PHASE_AIM
+g_fire_phase = FIRE_PHASE_SHOOT
 g_phase_t0 = 0.0
 g_ir_done = False
 g_last_shot_t = 0.0
@@ -1541,12 +1540,6 @@ def tick_fire():
         leave_combat_to_rescan("fire_give_up")
         return
 
-    if g_fire_phase == FIRE_PHASE_AIM or g_fire_phase == FIRE_PHASE_IR_DONE:
-        g_fire_phase = FIRE_PHASE_SHOOT
-        g_phase_t0 = now_s()
-        fire_bead_burst_start()
-        return
-
     if g_fire_phase == FIRE_PHASE_SHOOT:
         if phase_age() < T_FIRE_ON:
             fire_bead_burst_tick()
@@ -1556,7 +1549,7 @@ def tick_fire():
         fx_fire_wait_led()
         g_fire_phase = FIRE_PHASE_HOLD
         g_phase_t0 = now_s()
-        log("FIRE first/seg done min_fire_done=1 hold %.1fs" % T_FIRE_OFF)
+        log("FIRE shoot done hold %.1fs" % T_FIRE_OFF)
         return
 
     if g_fire_phase == FIRE_PHASE_HOLD:
@@ -1616,14 +1609,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.32.4 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.32.5 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.32.4 stamp=2026-08-06 21:30:00")
+    print("# LINE_GUARD_VERSION=1.32.5 stamp=2026-08-06 22:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
