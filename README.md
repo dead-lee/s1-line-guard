@@ -67,7 +67,7 @@ PATROL ──T_MOVE 贴线满──► SCAN
 | `T_FIRE_ON` / `T_FIRE_OFF` | 3.0 / 3.0 s | 射击段 / 停火只瞄段 |
 | `SCAN_STEP_DEG` / `SCAN_LOOK_OPS` | 45° / 5 | 扫视步进；每角查人次数 |
 | `PITCH_LINE` / `PITCH_SCAN` | −20 / 20 | 巡线低头 / 扫人抬头 |
-| `LINE_SPEED` | 0.14 | 巡线固定前进速度 |
+| `LINE_SPEED` | 0.12 | 巡线固定前进速度 |
 | `ENABLE_FIRE` | True | 是否允许水弹（联调可改 False） |
 
 灯光对照见 [`docs/design-notes.md`](docs/design-notes.md)。
