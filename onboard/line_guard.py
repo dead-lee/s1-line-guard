@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.36.0 stamp=2026-08-06 22:10:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.36.1 stamp=2026-08-06 22:20:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -24,13 +24,15 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：与 DJI 官方示例同结构（PID 330/0/28，固定 0.2，err=cx-0.5）
+# 巡线：官方 PID 结构 + 本机 yaw 方向
 LINE_SPEED = 0.20
 LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
 LINE_PID_KD = 28.0
+# PID 仍用 set_error(cx-0.5)；输出乘此系数再给云台（日志示负 err 时负 yaw 把车带离线）
+LINE_YAW_SIGN = -1.0
 LINE_CONFIRM_FRAMES = 3
-LINE_LOST_S = 1.5               # 连续看不到线超过此时长才判丢线
+LINE_LOST_S = 1.5
 LINE_LOG_DT = 1.0
 
 # 瞄准 PID：远距快锁、近中心软刹
@@ -689,12 +691,8 @@ def mode_ensure_line_follow(reason):
 
 def line_follow_step():
     """
-    与官方示例一致：
-      chassis_follow
-      err = LineList[19] - 0.5
-      PIDCtrl(330,0,28) → rotate_with_speed
-      set_trans_speed(0.2); move(0)
-    使用本 tick 已由 line_update 写入的 g_line_cx（只读一次视觉）。
+    官方结构：set_error(cx-0.5) → PID → rotate_with_speed；固定 LINE_SPEED。
+    云台指令 = PID 输出 * LINE_YAW_SIGN（本机 chassis_follow 方向与示例相反时为 -1）。
     """
     global g_line_err, g_line_yaw_spd
     cx = g_line_cx
@@ -709,6 +707,7 @@ def line_follow_step():
             yaw_spd = err * LINE_PID_KP
     else:
         yaw_spd = err * LINE_PID_KP
+    yaw_spd = yaw_spd * LINE_YAW_SIGN
     g_line_yaw_spd = yaw_spd
     try:
         robot_ctrl.set_mode(rm_define.robot_mode_chassis_follow)
@@ -1371,14 +1370,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.36.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.36.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.36.0 stamp=2026-08-06 22:10:00")
+    print("# LINE_GUARD_VERSION=1.36.1 stamp=2026-08-06 22:20:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")

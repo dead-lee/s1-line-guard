@@ -44,7 +44,7 @@
 
 ### 线 / 人
 
-- 线：与官方一致 — `RmList`，`len==42` 且 `[2]>=1`，`cx=[19]`，`PIDCtrl(330,0,28)`，`err=cx-0.5`，固定速度 0.2。  
+- 线：`RmList`，`cx=[19]`，`PIDCtrl(330,0,28)` 对 `cx-0.5`；云台速度再乘 `LINE_YAW_SIGN`（本机 -1）；固定速度 0.2。  
 - 人：`enable_detection(people)`；轮询 `get_people_detection_info` 或官方 `cond_wait`（阻塞，不宜插在步进 SCAN 中途单独依赖）。  
 - 行人误检（沙发/行李）官方无更好过滤器；几何启发式不可靠。
 
