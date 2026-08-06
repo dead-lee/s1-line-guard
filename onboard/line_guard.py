@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.32.0 stamp=2026-08-06 18:00:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.32.4 stamp=2026-08-06 21:30:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -24,27 +24,44 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-LINE_SPEED = 0.30
-LINE_PID_KP = 330.0
+# 巡线（基于 1.32.2）：弯道减速 + 近点优先，目标「不转错弯、不冲出线」
+# 不做丢线后特殊处理；丢线仍走规格默认（stable_false → SCAN）
+LINE_SPEED_MAX = 0.38
+LINE_SPEED_MIN = 0.10
+LINE_PID_KP = 340.0
 LINE_PID_KI = 0.0
-LINE_PID_KD = 28.0
-LINE_GIMBAL_YAW_MAX = 300.0
-LINE_CX_DEADZONE = 0.02
+LINE_PID_KD = 45.0
+LINE_GIMBAL_YAW_MAX = 280.0
+LINE_GIMBAL_YAW_CORNER = 340.0  # 大偏差略抬；过大易甩出线
+LINE_CX_DEADZONE = 0.018
+LINE_ERR_SLOW = 0.05
+LINE_ERR_CRAWL = 0.14
+LINE_YAW_SLOW = 70.0
+LINE_YAW_CRAWL = 180.0
+LINE_CX_ALPHA = 0.55
+LINE_CX_JUMP = 0.10             # cx 突变跟新，防 EMA 在弯内拖反向
+LINE_DIVERGE_CORNER = 0.07      # |远-近|≥此 → 近点主导 + 强制慢速
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_FRAMES = 12
+LINE_SPEED = LINE_SPEED_MAX     # 兼容旧名
 
-AIM_YAW_KP = 100.0
-AIM_YAW_KI = 0.0
-AIM_YAW_KD = 20.0
-AIM_YAW_OUT_MAX = 150.0
-AIM_PITCH_KP = 70.0
-AIM_PITCH_KI = 0.0
-AIM_PITCH_KD = 16.0
-AIM_PITCH_OUT_MAX = 50.0
-AIM_DEADZONE = 0.04
-AIM_OK_ERR = 0.10
-AIM_ACQUIRE_ERR = 0.22
-AIM_ACQUIRE_YAW_MAX = 220.0
+# 瞄准 PID（1.32.1）：远距快锁、近中心软刹
+AIM_YAW_KP = 95.0
+AIM_YAW_KI = 6.0
+AIM_YAW_KD = 38.0
+AIM_YAW_OUT_MAX = 130.0
+AIM_PITCH_KP = 60.0
+AIM_PITCH_KI = 5.0
+AIM_PITCH_KD = 30.0
+AIM_PITCH_OUT_MAX = 42.0
+AIM_DEADZONE = 0.025
+AIM_OK_ERR = 0.07
+AIM_SOFT_ERR = 0.12
+AIM_SOFT_MIN = 0.22
+AIM_ACQUIRE_ERR = 0.16
+AIM_ACQUIRE_YAW_MAX = 300.0
+AIM_D_MAX = 1.8
+AIM_TRACK_ALPHA = 0.48
 
 PERSON_MIN_W = 0.08
 PERSON_MIN_H = 0.14
@@ -98,11 +115,14 @@ g_line_miss = 0
 g_line_cx = 0.5
 g_line_err = 0.0
 g_line_yaw_spd = 0.0
+g_line_spd = 0.0
 g_line_info_len = 0
 g_line_pts = 0
 g_line_ever_ok = False
 g_line_pid = None
 g_line_look_done = False
+g_line_cx_smooth = 0.5
+g_line_diverge = 0.0            # |远点cx-近点cx|，弯道判据
 # 锁定后记忆框（FOUND 时建立；有检出则刷新；无检出仍用于瞄准/开火）
 g_track_on = False
 g_track_x = 0.5
@@ -185,16 +205,20 @@ def pid_reset_aim():
     g_ep_prev = 0.0
 
 def pid_step(err, i_acc, e_prev, kp, ki, kd, out_max, dt):
+    """瞄准用 PID 一步。死区内清 I；D 限幅。"""
     if abs(err) < AIM_DEADZONE:
         return 0.0, 0.0, err
     i_new = i_acc + err * dt
-    i_new = clamp(i_new, -1.0, 1.0)
+    i_new = clamp(i_new, -0.6, 0.6)
     if dt > 0.0001:
         d = (err - e_prev) / dt
     else:
         d = 0.0
+    d = clamp(d, -AIM_D_MAX, AIM_D_MAX)
     out = kp * err + ki * i_new + kd * d
     out = clamp(out, -out_max, out_max)
+    if (out >= out_max and err > 0) or (out <= -out_max and err < 0):
+        i_new = i_acc
     return out, i_new, err
 
 # =============================================================================
@@ -405,13 +429,20 @@ def track_clear():
     g_track_h = 0.3
 
 def track_set(x, y, w, h):
-    """建立/刷新锁定记忆框。"""
+    """建立/刷新锁定记忆框；已在跟踪时 EMA，首锁直接跳到当前框。"""
     global g_track_on, g_track_x, g_track_y, g_track_w, g_track_h
+    if g_track_on:
+        a = AIM_TRACK_ALPHA
+        g_track_x = a * x + (1.0 - a) * g_track_x
+        g_track_y = a * y + (1.0 - a) * g_track_y
+        g_track_w = a * w + (1.0 - a) * g_track_w
+        g_track_h = a * h + (1.0 - a) * g_track_h
+    else:
+        g_track_x = x
+        g_track_y = y
+        g_track_w = w
+        g_track_h = h
     g_track_on = True
-    g_track_x = x
-    g_track_y = y
-    g_track_w = w
-    g_track_h = h
 
 def track_from_people():
     """若本帧有效检出则刷新记忆框，返回是否刷新。"""
@@ -482,41 +513,59 @@ def aim_pid_dt():
     g_aim_t_prev = t
     return dt
 
+def _aim_soft_scale(abs_err):
+    """近中心软刹：|err| 从 DEADZONE→SOFT_ERR 时输出上限从 SOFT_MIN→1。"""
+    if abs_err >= AIM_SOFT_ERR:
+        return 1.0
+    span = AIM_SOFT_ERR - AIM_DEADZONE
+    if span < 0.001:
+        return AIM_SOFT_MIN
+    t = (abs_err - AIM_DEADZONE) / span
+    if t < 0.0:
+        t = 0.0
+    if t > 1.0:
+        t = 1.0
+    t = t ** 0.5
+    return AIM_SOFT_MIN + (1.0 - AIM_SOFT_MIN) * t
+
 def aim_pid_towards_xy(x, y, dt):
-    """瞄准：把人体框中心 (x,y) 拉向画面中心（PID；边缘大误差加速）。"""
+    """瞄准：大偏差快锁；软刹区降 max 防过冲；仅双轴死区硬停。"""
     global g_iy, g_ey_prev, g_ip, g_ep_prev
     err_yaw = x - 0.5
     err_pitch = y - 0.5
-    yaw_max = AIM_YAW_OUT_MAX
-    pitch_max = AIM_PITCH_OUT_MAX
-    # 画面边缘：提高 yaw 输出上限，尽快对准
-    if abs(err_yaw) >= AIM_ACQUIRE_ERR:
+    abs_ey = abs(err_yaw)
+    abs_ep = abs(err_pitch)
+    if abs_ey < AIM_DEADZONE and abs_ep < AIM_DEADZONE:
+        g_iy = 0.0
+        g_ip = 0.0
+        g_ey_prev = err_yaw
+        g_ep_prev = err_pitch
+        gimbal_stop()
+        return True
+    if abs_ey >= AIM_ACQUIRE_ERR:
         yaw_max = AIM_ACQUIRE_YAW_MAX
+    else:
+        yaw_max = AIM_YAW_OUT_MAX * _aim_soft_scale(abs_ey)
+    pitch_max = AIM_PITCH_OUT_MAX * _aim_soft_scale(abs_ep)
     yaw_spd, g_iy, g_ey_prev = pid_step(
         err_yaw, g_iy, g_ey_prev, AIM_YAW_KP, AIM_YAW_KI, AIM_YAW_KD, yaw_max, dt
     )
     pitch_spd, g_ip, g_ep_prev = pid_step(
         err_pitch, g_ip, g_ep_prev, AIM_PITCH_KP, AIM_PITCH_KI, AIM_PITCH_KD, pitch_max, dt
     )
-    if abs(err_yaw) < AIM_OK_ERR and abs(err_pitch) < AIM_OK_ERR:
-        gimbal_stop()
-        return True
     try:
         gimbal_ctrl.rotate_with_speed(yaw_spd, -pitch_spd)
     except Exception:
         pass
-    return False
+    return abs_ey < AIM_OK_ERR and abs_ep < AIM_OK_ERR
 
 def aim_pid_track():
-    """
-    瞄准：有当前检出跟当前；否则若已锁定则跟记忆框（支持静态/闪断）。
-    无记忆且无检出才停转。
-    """
+    """有检出 EMA 刷新并跟平滑中心；无检出跟记忆框。"""
     dt = aim_pid_dt()
     ok, x, y, w, h = people_get_first()
     if ok:
         track_set(x, y, w, h)
-        return aim_pid_towards_xy(x, y, dt), True
+        return aim_pid_towards_xy(g_track_x, g_track_y, dt), True
     if g_track_on:
         return aim_pid_towards_xy(g_track_x, g_track_y, dt), False
     gimbal_stop()
@@ -532,10 +581,60 @@ def line_get_rmlist():
     except Exception:
         return raw
 
+def _line_iget(info, i):
+    try:
+        return info[i]
+    except Exception:
+        return None
+
+def line_cx_from_info(info, pts):
+    """
+    控制用 cx：近/中/远融合。
+    点列 (x,y) 交替时远点 x≈[19]；近≈[7]、中≈[13]（与官方 RmList 一致时）。
+    远近分歧大（急弯）→ 近点主导，避免只跟远点转错弯/冲出线。
+    返回 (cx, diverge)；失败 (None, 0)。
+    """
+    global g_line_diverge
+    cx_far = None
+    try:
+        cx_far = float(info[19])
+    except Exception:
+        cx_far = None
+    if cx_far is None:
+        g_line_diverge = 0.0
+        return None, 0.0
+    cx_near = None
+    cx_mid = None
+    try:
+        v = _line_iget(info, 7)
+        if v is not None:
+            cx_near = float(v)
+    except Exception:
+        cx_near = None
+    try:
+        v = _line_iget(info, 13)
+        if v is not None:
+            cx_mid = float(v)
+    except Exception:
+        cx_mid = None
+    if cx_near is None or pts < 3:
+        g_line_diverge = 0.0
+        return cx_far, 0.0
+    if cx_mid is None:
+        cx_mid = 0.5 * (cx_near + cx_far)
+    diverge = abs(cx_far - cx_near)
+    g_line_diverge = diverge
+    if diverge >= LINE_DIVERGE_CORNER:
+        # 急弯：近处蓝线为准
+        cx = 0.60 * cx_near + 0.30 * cx_mid + 0.10 * cx_far
+    else:
+        cx = 0.25 * cx_near + 0.30 * cx_mid + 0.45 * cx_far
+    return cx, diverge
+
 def line_read():
     """
-    官方判定：len==42 且 [2]>=1 时 cx=[19]。
-    返回 (ok, cx, n, pts)
+    官方判定：len>=42 且 [2]>=1 时有线。
+    返回 (ok, cx, n, pts)；cx 为防转错弯的融合中心。
     """
     info = line_get_rmlist()
     try:
@@ -547,18 +646,11 @@ def line_read():
         pts = int(info[2])
     except Exception:
         pts = 0
-    if n == 42 and pts >= 1:
-        try:
-            cx = float(info[19])
-            return True, cx, n, pts
-        except Exception:
-            return False, 0.5, n, pts
     if n >= 42 and pts >= 1:
-        try:
-            cx = float(info[19])
+        cx, _div = line_cx_from_info(info, pts)
+        if cx is not None:
             return True, cx, n, pts
-        except Exception:
-            return False, 0.5, n, pts
+        return False, 0.5, n, pts
     return False, 0.5, n, pts
 
 def line_update():
@@ -729,26 +821,73 @@ def mode_ensure_line_follow(reason):
     g_mode_tag = "chassis_follow"
     log("MODE chassis_follow | %s" % reason)
 
+def _line_blend01(v, lo, hi):
+    """v 从 lo→hi 映射到 1→0。"""
+    if v <= lo:
+        return 1.0
+    if v >= hi:
+        return 0.0
+    return 1.0 - (v - lo) / (hi - lo)
+
+def line_speed_for_path(abs_err, abs_yaw, diverge):
+    """
+    直道快、弯道慢：大横向误差 / 大 yaw / 远近分歧（几何急弯）都降速。
+    目的：转弯在蓝线宽度内完成，从根上少丢线；不是丢线后补救。
+    """
+    e_fac = _line_blend01(abs_err, LINE_ERR_SLOW, LINE_ERR_CRAWL)
+    y_fac = _line_blend01(abs_yaw, LINE_YAW_SLOW, LINE_YAW_CRAWL)
+    fac = e_fac
+    if y_fac < fac:
+        fac = y_fac
+    if diverge >= LINE_DIVERGE_CORNER:
+        # 几何急弯：最多中低速
+        if fac > 0.35:
+            fac = 0.35
+    fac = fac * fac
+    return LINE_SPEED_MIN + (LINE_SPEED_MAX - LINE_SPEED_MIN) * fac
+
 def line_follow_step():
-    """单步循线：PID 云台 yaw + 底盘前进。"""
-    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_info_len, g_line_pts
+    """
+    单步循线：融合 cx → PID yaw（chassis_follow）+ 路径自适应速度。
+    急弯近点主导、强制降速，减少转错弯与冲出线。
+    """
+    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_spd
+    global g_line_info_len, g_line_pts, g_line_cx_smooth
     ok, cx, n, pts = line_read()
     g_line_info_len = n
     g_line_pts = pts
     if ok == False:
         g_line_yaw_spd = 0.0
         g_line_err = 0.0
+        g_line_spd = 0.0
         try:
             gimbal_ctrl.rotate_with_speed(0, 0)
         except Exception:
             pass
         chassis_halt()
         return
-    g_line_cx = cx
-    err = cx - 0.5
+
+    if abs(cx - g_line_cx_smooth) >= LINE_CX_JUMP:
+        g_line_cx_smooth = cx
+    else:
+        g_line_cx_smooth = (
+            LINE_CX_ALPHA * cx + (1.0 - LINE_CX_ALPHA) * g_line_cx_smooth
+        )
+    g_line_cx = g_line_cx_smooth
+    err = g_line_cx - 0.5
     g_line_err = err
+    abs_err = abs(err)
+    diverge = g_line_diverge
+
+    yaw_max = LINE_GIMBAL_YAW_MAX
+    if abs_err >= LINE_ERR_SLOW or diverge >= LINE_DIVERGE_CORNER:
+        t = _line_blend01(abs_err, LINE_ERR_SLOW, LINE_ERR_CRAWL)
+        if diverge >= LINE_DIVERGE_CORNER and t > 0.4:
+            t = 0.4
+        yaw_max = LINE_GIMBAL_YAW_CORNER + (LINE_GIMBAL_YAW_MAX - LINE_GIMBAL_YAW_CORNER) * t
+
     yaw_spd = 0.0
-    if abs(err) >= LINE_CX_DEADZONE:
+    if abs_err >= LINE_CX_DEADZONE:
         if g_line_pid is not None:
             try:
                 g_line_pid.set_error(err)
@@ -757,18 +896,22 @@ def line_follow_step():
                 yaw_spd = err * LINE_PID_KP
         else:
             yaw_spd = err * LINE_PID_KP
-        yaw_spd = clamp(yaw_spd, -LINE_GIMBAL_YAW_MAX, LINE_GIMBAL_YAW_MAX)
+        yaw_spd = clamp(yaw_spd, -yaw_max, yaw_max)
     g_line_yaw_spd = yaw_spd
+
     try:
         gimbal_ctrl.rotate_with_speed(yaw_spd, 0)
     except Exception:
         pass
+
+    spd = line_speed_for_path(abs_err, abs(yaw_spd), diverge)
+    g_line_spd = spd
     try:
-        chassis_ctrl.set_trans_speed(LINE_SPEED)
+        chassis_ctrl.set_trans_speed(spd)
         chassis_ctrl.move(0)
     except Exception:
         try:
-            chassis_ctrl.move_with_speed(LINE_SPEED, 0, 0)
+            chassis_ctrl.move_with_speed(spd, 0, 0)
         except Exception:
             chassis_halt()
 
@@ -1191,13 +1334,16 @@ def set_state(s, reason):
         g_line_hit = 0
         g_line_miss = 0
         g_line_cx = 0.5
+        g_line_cx_smooth = 0.5
+        g_line_diverge = 0.0
         g_line_err = 0.0
         g_line_yaw_spd = 0.0
+        g_line_spd = 0.0
         g_line_ever_ok = False
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-        log("PATROL ready spd=%.2f" % LINE_SPEED)
+        log("PATROL ready spd=%.2f~%.2f near-corner" % (LINE_SPEED_MIN, LINE_SPEED_MAX))
 
     # SCAN：完整两遍步进扫描
     if s == STATE_SCAN:
@@ -1472,14 +1618,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.32.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.32.4 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.32.0 stamp=2026-08-06 18:00:00")
+    print("# LINE_GUARD_VERSION=1.32.4 stamp=2026-08-06 21:30:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
