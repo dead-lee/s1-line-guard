@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.36.1 stamp=2026-08-06 22:20:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.37.0 stamp=2026-08-06 22:30:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -24,13 +24,12 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：官方 PID 结构 + 本机 yaw 方向
-LINE_SPEED = 0.20
+# 巡线：官方 set_error(cx-0.5)+PIDCtrl；yaw 不反号；限幅防尖峰
+LINE_SPEED = 0.15
 LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
 LINE_PID_KD = 28.0
-# PID 仍用 set_error(cx-0.5)；输出乘此系数再给云台（日志示负 err 时负 yaw 把车带离线）
-LINE_YAW_SIGN = -1.0
+LINE_YAW_MAX = 100.0            # 限制 |yaw|，防 D 项/尖峰甩飞
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_S = 1.5
 LINE_LOG_DT = 1.0
@@ -691,8 +690,8 @@ def mode_ensure_line_follow(reason):
 
 def line_follow_step():
     """
-    官方结构：set_error(cx-0.5) → PID → rotate_with_speed；固定 LINE_SPEED。
-    云台指令 = PID 输出 * LINE_YAW_SIGN（本机 chassis_follow 方向与示例相反时为 -1）。
+    官方：set_error(cx-0.5) → PID → rotate_with_speed；固定 LINE_SPEED。
+    不反号；|yaw| 限 LINE_YAW_MAX；不每帧 set_mode（避免跟线被重置）。
     """
     global g_line_err, g_line_yaw_spd
     cx = g_line_cx
@@ -707,12 +706,11 @@ def line_follow_step():
             yaw_spd = err * LINE_PID_KP
     else:
         yaw_spd = err * LINE_PID_KP
-    yaw_spd = yaw_spd * LINE_YAW_SIGN
+    if yaw_spd > LINE_YAW_MAX:
+        yaw_spd = LINE_YAW_MAX
+    if yaw_spd < -LINE_YAW_MAX:
+        yaw_spd = -LINE_YAW_MAX
     g_line_yaw_spd = yaw_spd
-    try:
-        robot_ctrl.set_mode(rm_define.robot_mode_chassis_follow)
-    except Exception:
-        pass
     try:
         gimbal_ctrl.rotate_with_speed(yaw_spd, 0)
     except Exception:
@@ -1225,13 +1223,15 @@ def tick_patrol():
             set_state(STATE_SCAN, "no_line_timeout")
             return
         return
-    # 有线：官方贴线
+    # 有线：官方贴线（先 step 再 log，避免 start 时 err/yaw 仍为 0）
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
         g_line_log_t = 0.0
+        line_follow_step()
         line_follow_log_snapshot("start")
-    line_follow_step()
-    line_follow_log_tick()
+    else:
+        line_follow_step()
+        line_follow_log_tick()
     if (now_s() - g_patrol_line_t0) >= T_MOVE:
         line_follow_log_snapshot("done")
         g_patrol_line_t0 = 0.0
@@ -1370,14 +1370,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.36.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.37.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.36.1 stamp=2026-08-06 22:20:00")
+    print("# LINE_GUARD_VERSION=1.37.0 stamp=2026-08-06 22:30:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
