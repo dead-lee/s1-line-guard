@@ -24,16 +24,16 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：官方框架 — 单点 cx=[19] + PIDCtrl + 固定速度（稳定贴线）
-LINE_SPEED = 0.20               # 固定前进速度（官方示例约 0.2）
-LINE_PID_KP = 330.0             # 与官方示例一致
+# 巡线：单点 cx=[19] + PIDCtrl + 固定速度
+LINE_SPEED = 0.20
+LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
 LINE_PID_KD = 28.0
-LINE_GIMBAL_YAW_MAX = 200.0     # 限幅防甩过头（官方不限；略收）
+LINE_GIMBAL_YAW_MAX = 200.0
 LINE_CX_DEADZONE = 0.02
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_FRAMES = 12
-LINE_LOG_DT = 1.0               # 过程日志约每秒一条
+LINE_LOG_DT = 1.0
 
 # 瞄准 PID：远距快锁、近中心软刹
 AIM_YAW_KP = 95.0
@@ -519,7 +519,7 @@ def aim_pid_track():
     return False, False
 
 # =============================================================================
-# LINE VISION — RmList 读蓝线（与官方示例下标一致）
+# LINE VISION — RmList 读蓝线
 # =============================================================================
 def line_get_rmlist():
     raw = vision_ctrl.get_line_detection_info()
@@ -529,10 +529,7 @@ def line_get_rmlist():
         return raw
 
 def line_read():
-    """
-    官方：len>=42 且 [2]>=1 有线，cx=[19]。
-    返回 (ok, cx, n, pts)
-    """
+    """有线：len>=42 且 [2]>=1，cx=[19]。返回 (ok, cx, n, pts)。"""
     info = line_get_rmlist()
     try:
         n = len(info)
@@ -574,7 +571,7 @@ def line_stable_false():
     return g_line_miss >= need
 
 def line_pid_init():
-    """官方 PIDCtrl(330, 0, 28)。"""
+    """初始化巡线 PIDCtrl。"""
     global g_line_pid
     g_line_pid = None
     try:
@@ -700,11 +697,7 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """
-    官方循线一步：
-      err = cx[19] - 0.5 → PID → rotate_with_speed
-      固定 LINE_SPEED 前进（chassis_follow）
-    """
+    """循线一步：err=cx-0.5 → PID → yaw；固定 LINE_SPEED 前进。"""
     global g_line_cx, g_line_err, g_line_yaw_spd, g_line_pts
     ok, cx, n, pts = line_read()
     g_line_pts = pts
