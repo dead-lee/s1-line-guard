@@ -1271,6 +1271,9 @@ def set_state(s, reason):
     global g_patrol_line_t0, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_line_ever_ok
     global g_min_fire_done, g_burst_shots, g_last_shot_t
+    global g_line_cx, g_line_cx_smooth, g_line_diverge
+    global g_line_cx_near, g_line_cx_mid, g_line_cx_far
+    global g_line_err, g_line_yaw_spd, g_line_spd, g_line_log_t
     old = g_state
     g_state = s
     g_state_t0 = now_s()
