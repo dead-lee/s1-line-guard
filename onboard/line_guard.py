@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.35.0 stamp=2026-08-06 21:55:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.36.0 stamp=2026-08-06 22:10:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -24,15 +24,13 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：cx=[19]，err=cx-0.5，纯 P + 固定慢速（主循环快，D 项易抖）
-LINE_SPEED = 0.12
-LINE_PID_KP = 160.0
+# 巡线：与 DJI 官方示例同结构（PID 330/0/28，固定 0.2，err=cx-0.5）
+LINE_SPEED = 0.20
+LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
-LINE_PID_KD = 0.0
-LINE_GIMBAL_YAW_MAX = 90.0
-LINE_CX_DEADZONE = 0.025
+LINE_PID_KD = 28.0
 LINE_CONFIRM_FRAMES = 3
-LINE_LOST_FRAMES = 12
+LINE_LOST_S = 1.5               # 连续看不到线超过此时长才判丢线
 LINE_LOG_DT = 1.0
 
 # 瞄准 PID：远距快锁、近中心软刹
@@ -102,6 +100,7 @@ g_line_pts = 0
 g_line_ever_ok = False
 g_line_pid = None
 g_line_log_t = 0.0
+g_line_miss_t0 = 0.0
 # 记忆框：FOUND 建立；有检出刷新；无检出仍用于瞄准/开火
 g_track_on = False
 g_track_x = 0.5
@@ -529,7 +528,7 @@ def line_get_rmlist():
         return raw
 
 def line_read():
-    """有线：len>=42 且 [2]>=1，cx=[19]。返回 (ok, cx, n, pts)。"""
+    """官方：len==42 且 [2]>=1，cx=[19]。返回 (ok, cx, n, pts)。"""
     info = line_get_rmlist()
     try:
         n = len(info)
@@ -540,7 +539,8 @@ def line_read():
         pts = int(info[2])
     except Exception:
         pts = 0
-    if n >= 42 and pts >= 1:
+    # 与官方一致优先 len==42；兼容少数固件 >=42
+    if pts >= 1 and (n == 42 or n >= 42):
         try:
             cx = float(info[19])
             return True, cx, n, pts
@@ -549,26 +549,29 @@ def line_read():
     return False, 0.5, n, pts
 
 def line_update():
-    global g_line_hit, g_line_miss, g_line_cx, g_line_pts, g_line_ever_ok
+    global g_line_hit, g_line_miss, g_line_cx, g_line_pts, g_line_ever_ok, g_line_miss_t0
     ok, cx, n, pts = line_read()
     g_line_pts = pts
     if ok:
         g_line_cx = cx
         g_line_hit = g_line_hit + 1
         g_line_miss = 0
+        g_line_miss_t0 = 0.0
         g_line_ever_ok = True
     else:
         g_line_miss = g_line_miss + 1
         g_line_hit = 0
+        if g_line_miss_t0 <= 0.0:
+            g_line_miss_t0 = now_s()
 
 def line_stable_true():
     return g_line_hit >= LINE_CONFIRM_FRAMES
 
 def line_stable_false():
-    need = LINE_CONFIRM_FRAMES
-    if g_patrol_line_t0 > 0.0:
-        need = LINE_LOST_FRAMES
-    return g_line_miss >= need
+    """连续 LINE_LOST_S 秒看不到线才判丢线（勿用帧数：主循环过快）。"""
+    if g_line_miss_t0 <= 0.0:
+        return False
+    return (now_s() - g_line_miss_t0) >= LINE_LOST_S
 
 def line_pid_init():
     """初始化巡线 PIDCtrl。"""
@@ -591,25 +594,13 @@ def line_pid_init():
         log("LINE PIDCtrl unavailable, P only")
 
 def line_look_down_official():
-    """低头到 PITCH_LINE：先水平再相对 down，失败则绝对 pitch_ctrl。"""
+    """官方：相对低头 rotate_with_degree(gimbal_down, 20)。"""
     down_deg = -PITCH_LINE
     if down_deg < 0:
         down_deg = -down_deg
     try:
-        gimbal_ctrl.rotate_with_speed(0, 0)
-    except Exception:
-        pass
-    try:
-        gimbal_ctrl.yaw_ctrl(0)
-    except Exception:
-        pass
-    try:
-        gimbal_ctrl.pitch_ctrl(0)
-    except Exception:
-        pass
-    try:
         gimbal_ctrl.rotate_with_degree(rm_define.gimbal_down, down_deg)
-        log("LINE look_down relative %d deg (pitch_line=%d)" % (down_deg, PITCH_LINE))
+        log("LINE look_down %d deg" % down_deg)
     except Exception:
         try:
             gimbal_ctrl.pitch_ctrl(PITCH_LINE)
@@ -697,28 +688,32 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """循线一步：err=cx-0.5 → 纯 P → yaw；固定 LINE_SPEED。"""
-    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_pts
-    ok, cx, n, pts = line_read()
-    g_line_pts = pts
-    if ok == False:
-        g_line_yaw_spd = 0.0
-        g_line_err = 0.0
-        try:
-            gimbal_ctrl.rotate_with_speed(0, 0)
-        except Exception:
-            pass
-        chassis_halt()
-        return
-    g_line_cx = cx
+    """
+    与官方示例一致：
+      chassis_follow
+      err = LineList[19] - 0.5
+      PIDCtrl(330,0,28) → rotate_with_speed
+      set_trans_speed(0.2); move(0)
+    使用本 tick 已由 line_update 写入的 g_line_cx（只读一次视觉）。
+    """
+    global g_line_err, g_line_yaw_spd
+    cx = g_line_cx
     err = cx - 0.5
     g_line_err = err
     yaw_spd = 0.0
-    if abs(err) >= LINE_CX_DEADZONE:
-        # 纯 P：主循环无 sleep 时官方 PID 的 D 会放大噪声
+    if g_line_pid is not None:
+        try:
+            g_line_pid.set_error(err)
+            yaw_spd = g_line_pid.get_output()
+        except Exception:
+            yaw_spd = err * LINE_PID_KP
+    else:
         yaw_spd = err * LINE_PID_KP
-        yaw_spd = clamp(yaw_spd, -LINE_GIMBAL_YAW_MAX, LINE_GIMBAL_YAW_MAX)
     g_line_yaw_spd = yaw_spd
+    try:
+        robot_ctrl.set_mode(rm_define.robot_mode_chassis_follow)
+    except Exception:
+        pass
     try:
         gimbal_ctrl.rotate_with_speed(yaw_spd, 0)
     except Exception:
@@ -1134,7 +1129,7 @@ def set_state(s, reason):
     global g_patrol_line_t0, g_fire_phase, g_phase_t0
     global g_ir_done, g_line_hit, g_line_miss, g_line_ever_ok
     global g_min_fire_done, g_burst_shots, g_last_shot_t
-    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_log_t
+    global g_line_cx, g_line_err, g_line_yaw_spd, g_line_log_t, g_line_miss_t0
     old = g_state
     g_state = s
     g_state_t0 = now_s()
@@ -1148,19 +1143,16 @@ def set_state(s, reason):
 
     if s == STATE_PATROL:
         fire_stop()
-        mode_ensure_free("patrol_before_pose")
-        try:
-            gimbal_ctrl.yaw_ctrl(0)
-            gimbal_ctrl.pitch_ctrl(0)
-        except Exception:
-            pass
-        mode_ensure_line_follow("patrol_start")
+        chassis_halt()
+        # 官方：先 chassis_follow，再低头，再进循环贴线
         line_pid_init()
+        mode_ensure_line_follow("patrol_start")
         line_look_down_official()
         fx_patrol()
         g_patrol_line_t0 = 0.0
         g_line_hit = 0
         g_line_miss = 0
+        g_line_miss_t0 = 0.0
         g_line_cx = 0.5
         g_line_err = 0.0
         g_line_yaw_spd = 0.0
@@ -1169,7 +1161,9 @@ def set_state(s, reason):
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-        log("PATROL ready spd=%.2f log_dt=%.1fs" % (LINE_SPEED, LINE_LOG_DT))
+        log("PATROL ready spd=%.2f pid=%.0f/%.0f/%.0f" % (
+            LINE_SPEED, LINE_PID_KP, LINE_PID_KI, LINE_PID_KD
+        ))
 
     # SCAN：完整两遍步进扫描
     if s == STATE_SCAN:
@@ -1201,45 +1195,41 @@ def set_state(s, reason):
 
 
 def tick_patrol():
-    """蓝线巡线 T_MOVE 秒后进 SCAN；巡线阶段不认人。"""
+    """
+    蓝线巡线 T_MOVE 秒后进 SCAN。
+    有线：按官方 PID 贴线；无线：停车；持续 LINE_LOST_S 秒无线才 SCAN。
+    """
     global g_patrol_line_t0, g_line_log_t
     line_update()
-    if line_stable_false():
-        if g_line_ever_ok:
+    if g_line_hit < 1:
+        # 本帧无线：停车（官方循环只是不发指令；我们停车防冲出）
+        try:
+            gimbal_ctrl.rotate_with_speed(0, 0)
+        except Exception:
+            pass
+        chassis_halt()
+        if g_line_ever_ok and line_stable_false():
             line_follow_log_snapshot("LOST")
-            log(
-                "PATROL leave no_line_stable miss=%d hit=%d ever=1 -> SCAN"
-                % (g_line_miss, g_line_hit)
-            )
+            log("PATROL leave no_line lost_s>=%.1f miss=%d -> SCAN" % (
+                LINE_LOST_S, g_line_miss
+            ))
             g_patrol_line_t0 = 0.0
             g_line_log_t = 0.0
             person_hit_reset()
             set_state(STATE_SCAN, "no_line_stable")
             return
-        if state_age() >= 4.0:
+        if g_line_ever_ok == False and state_age() >= 4.0:
             line_follow_log_snapshot("never")
             log("PATROL leave no_line_timeout age=%.1fs -> SCAN" % state_age())
             g_patrol_line_t0 = 0.0
             g_line_log_t = 0.0
             set_state(STATE_SCAN, "no_line_timeout")
             return
-        try:
-            gimbal_ctrl.rotate_with_speed(0, 0)
-        except Exception:
-            pass
-        chassis_halt()
         return
-    if line_stable_true() == False:
-        try:
-            gimbal_ctrl.rotate_with_speed(0, 0)
-        except Exception:
-            pass
-        chassis_halt()
-        return
+    # 有线：官方贴线
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
         g_line_log_t = 0.0
-        mode_ensure_line_follow("patrol_follow_begin")
         line_follow_log_snapshot("start")
     line_follow_step()
     line_follow_log_tick()
@@ -1381,14 +1371,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.35.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.36.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.35.0 stamp=2026-08-06 21:55:00")
+    print("# LINE_GUARD_VERSION=1.36.0 stamp=2026-08-06 22:10:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")

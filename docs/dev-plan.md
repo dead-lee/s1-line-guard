@@ -10,7 +10,7 @@
 |------|------|
 | 单文件车载 | `onboard/line_guard.py` 粘贴进 App 实验室 |
 | 状态 | **PATROL ⇄ SCAN → FIRE** |
-| 巡线 | 蓝线 + `chassis_follow`；官方单点 `[19]` + PID + 固定速度 |
+| 巡线 | 蓝线 + `chassis_follow`；与官方示例同结构（`[19]` + PID 330/0/28 + 0.2） |
 | 扫描 | 规划角步进约 45°；每角最多 5 次查人；hit≥3 → 立即 FIRE |
 | 交战 | 边瞄边射 3s / 停火只瞄 3s；首段 3s 内不因 miss 放弃 |
 | 无线 | 反复完整 SCAN，有线再 PATROL |
