@@ -1,9 +1,9 @@
-# LINE_GUARD_VERSION=1.37.2 stamp=2026-08-06 22:50:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.38.0 stamp=2026-08-07 13:30:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
 # 权威行为规格：../docs/behavior-spec.md（未写入规格的限制禁止实现）
-# 摘要：hit≥3 → 立即 FIRE 边瞄边射；至少射满 3s；之后 miss>3 才重扫
+# 摘要：hit≥3 → 立即告警+开火；FIRE 内不因丢人不停射；首段 3s 射完后 miss>3 才重扫
 
 # =============================================================================
 # CONFIG — 可调参数
@@ -111,6 +111,12 @@ g_track_y = 0.5
 g_track_w = 0.2
 g_track_h = 0.3
 g_min_fire_done = False         # 是否已完成至少一整段 3s 射击
+# 扫描过程中最后一次有效人体框（FOUND 时若本帧闪断仍可建记忆）
+g_last_see_ok = False
+g_last_see_x = 0.5
+g_last_see_y = 0.5
+g_last_see_w = 0.2
+g_last_see_h = 0.3
 
 # SCAN 队列与当前段（规划角步进）
 g_scan_queue = []
@@ -403,16 +409,38 @@ def track_set(x, y, w, h):
         g_track_h = h
     g_track_on = True
 
+def last_see_set(x, y, w, h):
+    global g_last_see_ok, g_last_see_x, g_last_see_y, g_last_see_w, g_last_see_h
+    g_last_see_ok = True
+    g_last_see_x = x
+    g_last_see_y = y
+    g_last_see_w = w
+    g_last_see_h = h
+
 def track_from_people():
     """若本帧有效检出则刷新记忆框，返回是否刷新。"""
     ok, x, y, w, h = people_get_first()
     if ok:
         track_set(x, y, w, h)
+        last_see_set(x, y, w, h)
         return True
     return False
 
+def track_ensure_for_engage():
+    """
+    发现后必须有记忆框：当前帧 → 扫描末次有效框 → 默认尺寸中心框。
+    保证进入 FIRE 后可以告警/开火，不再卡在「no solid person」。
+    """
+    if track_from_people():
+        return "live"
+    if g_last_see_ok:
+        track_set(g_last_see_x, g_last_see_y, g_last_see_w, g_last_see_h)
+        return "last_see"
+    track_set(0.5, 0.5, PERSON_FIRE_MIN_W, PERSON_FIRE_MIN_H)
+    return "default"
+
 def person_track_update():
-    """FIRE：有检出刷新记忆并清 miss；无检出 miss+1，记忆框保留。"""
+    """FIRE：有检出刷新记忆并清 miss；无检出 miss+1，记忆框保留、位置不撤。"""
     global g_person_miss
     if track_from_people():
         g_person_miss = 0
@@ -421,29 +449,28 @@ def person_track_update():
     return False
 
 def person_confirmed_lost():
-    """
-    须已完成至少 3s 射击后，连续 miss 超过 PERSON_MISS_NEED 才放弃。
-    首段射击完成前不因 miss 重扫。
-    """
+    """仅首段 3s 射击完成后，连续 miss 超过门槛才允许放弃。"""
     if g_min_fire_done == False:
         return False
     return g_person_miss > PERSON_MISS_NEED
 
 def leave_combat_to_rescan(reason):
     """结束交战：停火、清记忆，整圈 SCAN。"""
-    global g_min_fire_done
+    global g_min_fire_done, g_last_see_ok
     fire_stop()
     person_hit_reset()
     track_clear()
+    g_last_see_ok = False
     g_min_fire_done = False
     pid_reset_aim()
     fx_person_lost()
     set_state(STATE_SCAN, "rescan_after_%s" % reason)
 
 def engage_fire_immediate(reason):
-    """发现人后立即进入 FIRE：边瞄边射。"""
-    log("ENGAGE immediate FIRE | %s track=(%.2f,%.2f)" % (
-        reason, g_track_x, g_track_y
+    """发现人后立即进入 FIRE：告警 + 开火（不再回查「是否还有人」才开火）。"""
+    src = track_ensure_for_engage()
+    log("ENGAGE immediate FIRE | %s track=(%.2f,%.2f) src=%s" % (
+        reason, g_track_x, g_track_y, src
     ))
     set_state(STATE_FIRE, reason)
 
@@ -762,35 +789,10 @@ def fire_stop():
     except Exception:
         pass
 
-def person_fire_ok():
-    """
-    允许 IR/水弹：
-      当前帧 solid 框；或
-      已锁定记忆框且记忆框尺寸够大（静态/闪断仍可完成射击）。
-    """
-    ok, x, y, w, h = people_get_first()
-    if ok:
-        try:
-            if w >= PERSON_FIRE_MIN_W and h >= PERSON_FIRE_MIN_H:
-                return True
-        except Exception:
-            pass
-    if g_track_on:
-        try:
-            if g_track_w >= PERSON_FIRE_MIN_W and g_track_h >= PERSON_FIRE_MIN_H:
-                return True
-        except Exception:
-            return True
-        return True
-    return False
-
 def fire_ir_warn_once():
-    """红外示警一次。"""
+    """红外示警一次。已进 FIRE 即执行，不再查「当前是否有人」。"""
     global g_ir_done
     if g_ir_done:
-        return
-    if person_fire_ok() == False:
-        log("IR_WARN skip no solid person")
         return
     fx_fire_ir_led()
     if ENABLE_FIRE == False:
@@ -806,31 +808,29 @@ def fire_ir_warn_once():
     except Exception:
         ok_ir = False
     if ok_ir == False:
-        gun_ctrl.set_fire_count(1)
-        gun_ctrl.fire_once()
-        log("IR_WARN fallback gun")
+        try:
+            gun_ctrl.set_fire_count(1)
+            gun_ctrl.fire_once()
+            log("IR_WARN fallback gun")
+        except Exception:
+            log("IR_WARN fail")
     g_ir_done = True
 
 def fire_bead_burst_start():
-    """射击段开始：脉冲 fire_once（须当前可射）。"""
+    """射击段开始：已进 FIRE 即脉冲开火，不因丢人跳过。"""
     global g_last_shot_t, g_burst_shots
-    if ENABLE_FIRE == False:
-        log("FIRE_ON skip ENABLE_FIRE=0")
-        return
-    if person_fire_ok() == False:
-        log("FIRE_ON skip no solid person miss=%d" % g_person_miss)
-        return
     fx_fire_burst_led()
     g_last_shot_t = 0.0
     g_burst_shots = 0
+    if ENABLE_FIRE == False:
+        log("FIRE_ON skip ENABLE_FIRE=0 (led only)")
+        return
     fire_bead_pulse_once()
     log("FIRE_ON pulse interval=%.2fs for %.1fs" % (FIRE_PULSE_INTERVAL, T_FIRE_ON))
 
 def fire_bead_pulse_once():
     global g_last_shot_t, g_burst_shots
     if ENABLE_FIRE == False:
-        return
-    if person_fire_ok() == False:
         return
     n = FIRE_BEADS_PER_PULSE
     if n < 1:
@@ -847,14 +847,8 @@ def fire_bead_pulse_once():
         log("FIRE pulse fail")
 
 def fire_bead_burst_tick():
-    """射击段内按间隔补发脉冲。"""
+    """射击段内按间隔补发；不因当前帧无人而停射。"""
     if ENABLE_FIRE == False:
-        return
-    if person_fire_ok() == False:
-        try:
-            gun_ctrl.stop()
-        except Exception:
-            pass
         return
     if g_last_shot_t <= 0.0:
         fire_bead_pulse_once()
@@ -1049,6 +1043,7 @@ def scan_look_once():
     if frame_hit:
         ok2, px, py, pw, ph = people_get_first()
         if ok2:
+            last_see_set(px, py, pw, ph)
             whs = " xy=(%.2f,%.2f) wh=(%.2f,%.2f)" % (px, py, pw, ph)
     log(
         "SCAN_LOOK step=%d yaw=%.0f seg=%s look_ops=%d hit=%d/%d frame=%s "
@@ -1166,9 +1161,10 @@ def set_state(s, reason):
 
 
 
-    # FIRE：发现后立即边瞄边射；至少射满 T_FIRE_ON 再允许放弃
+    # FIRE：告警 + 开火；不因当前无人而跳过
     if s == STATE_FIRE:
         mode_ensure_free("enter_FIRE")
+        # 抬头到扫人俯仰；不 yaw 回中，保持发现时朝向
         gimbal_ensure_pitch_scan_soft()
         pid_reset_aim()
         fx_combat()
@@ -1176,16 +1172,15 @@ def set_state(s, reason):
         g_min_fire_done = False
         g_burst_shots = 0
         g_last_shot_t = 0.0
-        if g_track_on == False:
-            track_from_people()
+        track_ensure_for_engage()
         g_ir_done = False
         fire_ir_warn_once()
         g_fire_phase = FIRE_PHASE_SHOOT
         g_phase_t0 = now_s()
         fire_bead_burst_start()
         log(
-            "FIRE start aim+shoot on=%.1fs off=%.1fs track=(%.2f,%.2f) ir=%s"
-            % (T_FIRE_ON, T_FIRE_OFF, g_track_x, g_track_y, str(g_ir_done))
+            "FIRE start aim+shoot on=%.1fs off=%.1fs track=(%.2f,%.2f) ir=%s shots0=%d"
+            % (T_FIRE_ON, T_FIRE_OFF, g_track_x, g_track_y, str(g_ir_done), g_burst_shots)
         )
 
 
@@ -1259,12 +1254,8 @@ def tick_scan_common():
         found, frame_hit, dt_look = scan_look_once()
         # 唯一进 FIRE 条件：连续 hit 已达门槛
         if found:
-            gimbal_stop()
-            track_from_people()
-            log(
-                "SCAN FOUND hit=%d look_ops=%d step=%d track=(%.2f,%.2f) -> FIRE now"
-                % (g_person_hit, g_scan_look_ops, g_scan_step_i, g_track_x, g_track_y)
-            )
+            # 底盘保持停；不回中。记忆框优先本帧，否则用扫描中最后一次有效检出
+            chassis_halt()
             engage_fire_immediate("person_on_scan")
             return
         if scan_look_should_keep():
@@ -1310,9 +1301,8 @@ def tick_scan():
 
 def tick_fire():
     """
-    边瞄准边射击：
-      SHOOT 3s → HOLD 3s → SHOOT …
-      未完成首段 3s 射击前不得因 miss 放弃。
+    底盘停；跟记忆框瞄准；SHOOT 3s / HOLD 3s。
+    丢人不停射、不回中；仅首段射击完成后才允许 miss 放弃。
     """
     global g_fire_phase, g_phase_t0, g_min_fire_done
     chassis_halt()
@@ -1320,8 +1310,8 @@ def tick_fire():
     aim_pid_track()
 
     if person_confirmed_lost():
-        log("FIRE give_up miss=%d min_fire_done=%s -> SCAN" % (
-            g_person_miss, str(g_min_fire_done)
+        log("FIRE give_up miss=%d min_fire_done=1 shots=%d -> SCAN" % (
+            g_person_miss, g_burst_shots
         ))
         leave_combat_to_rescan("fire_give_up")
         return
@@ -1335,7 +1325,7 @@ def tick_fire():
         fx_fire_wait_led()
         g_fire_phase = FIRE_PHASE_HOLD
         g_phase_t0 = now_s()
-        log("FIRE shoot done hold %.1fs" % T_FIRE_OFF)
+        log("FIRE shoot done shots=%d hold %.1fs" % (g_burst_shots, T_FIRE_OFF))
         return
 
     if g_fire_phase == FIRE_PHASE_HOLD:
@@ -1368,14 +1358,14 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     line_pid_init()
-    log("setup done v1.37.2 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.38.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.37.2 stamp=2026-08-06 22:50:00")
+    print("# LINE_GUARD_VERSION=1.38.0 stamp=2026-08-07 13:30:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
