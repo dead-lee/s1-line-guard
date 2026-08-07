@@ -12,7 +12,7 @@ T_MOVE = 6.0                    # PATROL 贴线前进多久（秒）后进入 SC
 PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIRE
 PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
-# 人体框尺寸（画面 0~1）：仅 w/h 上下限；过带不算 hit（不用 aspect/cy）
+# 人体框尺寸（画面 0~1）：w/h 上下限，过带不算 hit
 PERSON_MIN_W = 0.08
 PERSON_MAX_W = 0.45
 PERSON_MIN_H = 0.20
