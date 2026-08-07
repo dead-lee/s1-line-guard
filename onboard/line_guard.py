@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.40.3 stamp=2026-08-07 15:45:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.40.4 stamp=2026-08-07 15:50:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -16,13 +16,14 @@ PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此
 PERSON_MIN_W = 0.08
 PERSON_MAX_W = 0.45
 PERSON_MIN_H = 0.20
-PERSON_MAX_H = 0.80
+PERSON_MAX_H = 0.90
 PERSON_FIRE_MIN_W = 0.08
 PERSON_FIRE_MIN_H = 0.20
 
 PITCH_LINE = -20
 PITCH_SCAN = 20
 GIMBAL_YAW_SPEED = 540.0
+GIMBAL_AIM_SPEED = 120.0
 
 SCAN_CW = 180.0
 SCAN_CCW = -180.0
@@ -38,23 +39,23 @@ LINE_CONFIRM_FRAMES = 3
 LINE_LOST_S = 1.5
 LINE_LOG_DT = 1.0
 
-# 瞄准 PID：远距快锁、近中心软刹
-AIM_YAW_KP = 95.0
-AIM_YAW_KI = 6.0
-AIM_YAW_KD = 38.0
-AIM_YAW_OUT_MAX = 130.0
-AIM_PITCH_KP = 60.0
-AIM_PITCH_KI = 5.0
-AIM_PITCH_KD = 30.0
-AIM_PITCH_OUT_MAX = 42.0
-AIM_DEADZONE = 0.025
-AIM_OK_ERR = 0.07
-AIM_SOFT_ERR = 0.12
-AIM_SOFT_MIN = 0.22
-AIM_ACQUIRE_ERR = 0.16
-AIM_ACQUIRE_YAW_MAX = 300.0
-AIM_D_MAX = 1.8
-AIM_TRACK_ALPHA = 0.48
+# 瞄准 PID：有检出才跟；丢失则云台保持（不跟冻结图像坐标）
+AIM_YAW_KP = 55.0
+AIM_YAW_KI = 2.0
+AIM_YAW_KD = 18.0
+AIM_YAW_OUT_MAX = 70.0
+AIM_PITCH_KP = 40.0
+AIM_PITCH_KI = 2.0
+AIM_PITCH_KD = 14.0
+AIM_PITCH_OUT_MAX = 28.0
+AIM_DEADZONE = 0.03
+AIM_OK_ERR = 0.08
+AIM_SOFT_ERR = 0.14
+AIM_SOFT_MIN = 0.25
+AIM_ACQUIRE_ERR = 0.20
+AIM_ACQUIRE_YAW_MAX = 90.0
+AIM_D_MAX = 1.2
+AIM_TRACK_ALPHA = 0.55
 
 T_FIRE_ON = 3.0                 # 射击段：边瞄边射
 T_FIRE_OFF = 3.0                # 停火段：只瞄
@@ -443,15 +444,6 @@ def track_ensure_for_engage():
     track_set(0.5, 0.5, PERSON_FIRE_MIN_W, PERSON_FIRE_MIN_H)
     return "default"
 
-def person_track_update():
-    """FIRE：有检出刷新记忆并清 miss；无检出 miss+1，记忆框保留、位置不撤。"""
-    global g_person_miss
-    if track_from_people():
-        g_person_miss = 0
-        return True
-    g_person_miss = g_person_miss + 1
-    return False
-
 def person_confirmed_lost():
     """仅首段 3s 射击完成后，连续 miss 超过门槛才允许放弃。"""
     if g_min_fire_done == False:
@@ -508,8 +500,25 @@ def _aim_soft_scale(abs_err):
     t = t ** 0.5
     return AIM_SOFT_MIN + (1.0 - AIM_SOFT_MIN) * t
 
+def aim_hold():
+    """丢失：云台速度清零保持姿态（不回中、不追冻结图像坐标）。"""
+    global g_iy, g_ip, g_aim_yaw_cmd, g_aim_pit_cmd, g_aim_centered
+    global g_aim_err_yaw, g_aim_err_pit, g_aim_src
+    g_iy = 0.0
+    g_ip = 0.0
+    g_aim_yaw_cmd = 0.0
+    g_aim_pit_cmd = 0.0
+    g_aim_err_yaw = 0.0
+    g_aim_err_pit = 0.0
+    g_aim_centered = False
+    g_aim_src = "hold"
+    try:
+        gimbal_ctrl.rotate_with_speed(0, 0)
+    except Exception:
+        pass
+
 def aim_pid_towards_xy(x, y, dt):
-    """瞄准：把图像坐标 (x,y) 拉向画面中心。"""
+    """有检出时：把当前框中心 (x,y) 拉向画面中心。"""
     global g_iy, g_ey_prev, g_ip, g_ep_prev
     global g_aim_err_yaw, g_aim_err_pit, g_aim_yaw_cmd, g_aim_pit_cmd, g_aim_centered
     err_yaw = x - 0.5
@@ -526,7 +535,10 @@ def aim_pid_towards_xy(x, y, dt):
         g_aim_yaw_cmd = 0.0
         g_aim_pit_cmd = 0.0
         g_aim_centered = True
-        gimbal_stop()
+        try:
+            gimbal_ctrl.rotate_with_speed(0, 0)
+        except Exception:
+            pass
         return True
     g_aim_centered = False
     if abs_ey >= AIM_ACQUIRE_ERR:
@@ -548,31 +560,26 @@ def aim_pid_towards_xy(x, y, dt):
         pass
     return abs_ey < AIM_OK_ERR and abs_ep < AIM_OK_ERR
 
-def aim_pid_track():
+def aim_fire_step():
     """
-    有检出：刷新记忆并跟（图像坐标会随云台变）。
-    无检出：跟冻结的记忆图像坐标——云台一转，误差不会因「记忆未动」而变小，
-    可能持续 rotate（这是 mem 跟瞄逻辑问题，用 FIRE 日志观察）。
+    FIRE 单步瞄准（每 tick 只读一次人）：
+      live → 用本帧框中心 PID；
+      miss → 保持云台，不清记忆框（等再现或 miss 超限放弃）。
+    返回是否本帧有检出。
     """
-    global g_aim_src, g_aim_yaw_cmd, g_aim_pit_cmd, g_aim_centered
-    global g_aim_err_yaw, g_aim_err_pit
+    global g_person_miss, g_aim_src
     dt = aim_pid_dt()
     ok, x, y, w, h = people_get_first()
     if ok:
+        g_person_miss = 0
         track_set(x, y, w, h)
+        last_see_set(x, y, w, h)
         g_aim_src = "live"
-        return aim_pid_towards_xy(g_track_x, g_track_y, dt), True
-    if g_track_on:
-        g_aim_src = "mem"
-        return aim_pid_towards_xy(g_track_x, g_track_y, dt), False
-    g_aim_src = "stop"
-    g_aim_yaw_cmd = 0.0
-    g_aim_pit_cmd = 0.0
-    g_aim_err_yaw = 0.0
-    g_aim_err_pit = 0.0
-    g_aim_centered = True
-    gimbal_stop()
-    return False, False
+        aim_pid_towards_xy(x, y, dt)
+        return True
+    g_person_miss = g_person_miss + 1
+    aim_hold()
+    return False
 
 def fire_aim_log_tick():
     """FIRE 内限频打瞄准诊断。"""
@@ -1233,8 +1240,9 @@ def set_state(s, reason):
     # FIRE：告警 + 开火；不因当前无人而跳过
     if s == STATE_FIRE:
         mode_ensure_free("enter_FIRE")
-        # 抬头到扫人俯仰；不 yaw 回中，保持发现时朝向
+        # 保持发现时朝向；俯仰偏扫人角才轻抬；瞄准用较低转速上限
         gimbal_ensure_pitch_scan_soft()
+        set_gimbal_speed(GIMBAL_AIM_SPEED)
         pid_reset_aim()
         fx_combat()
         g_person_miss = 0
@@ -1371,13 +1379,12 @@ def tick_scan():
 
 def tick_fire():
     """
-    底盘停；瞄准 live 或 mem；SHOOT 3s / HOLD 3s。
+    底盘停；live 跟瞄 / miss 保持；SHOOT 3s / HOLD 3s。
     丢人不停射；首段射完后 miss 才可放弃。
     """
     global g_fire_phase, g_phase_t0, g_min_fire_done, g_fire_log_t
     chassis_halt()
-    person_track_update()
-    aim_pid_track()
+    aim_fire_step()
     fire_aim_log_tick()
 
     if person_confirmed_lost():
@@ -1430,14 +1437,14 @@ def setup():
     line_pid_init()
     person_hit_reset()
     log(
-        "setup done v1.40.3 person w=%.2f~%.2f h=%.2f~%.2f"
+        "setup done v1.40.4 person w=%.2f~%.2f h=%.2f~%.2f"
         % (PERSON_MIN_W, PERSON_MAX_W, PERSON_MIN_H, PERSON_MAX_H)
     )
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.40.3 stamp=2026-08-07 15:45:00")
+    print("# LINE_GUARD_VERSION=1.40.4 stamp=2026-08-07 15:50:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
