@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.40.2 stamp=2026-08-07 15:35:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.40.3 stamp=2026-08-07 15:45:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -665,21 +665,6 @@ def line_stable_false():
         return False
     return (now_s() - g_line_miss_t0) >= LINE_LOST_S
 
-def line_look_down():
-    """巡线低头。"""
-    down_deg = -PITCH_LINE
-    if down_deg < 0:
-        down_deg = -down_deg
-    try:
-        gimbal_ctrl.rotate_with_degree(rm_define.gimbal_down, down_deg)
-        log("LINE look_down %d deg" % down_deg)
-    except Exception:
-        try:
-            gimbal_ctrl.pitch_ctrl(PITCH_LINE)
-            log("LINE look_down fallback pitch=%d" % PITCH_LINE)
-        except Exception:
-            log("LINE look_down FAIL")
-
 def line_pid_init():
     """创建巡线 PIDCtrl；不可用则 g_line_pid=None（步进里用纯 P）。"""
     global g_line_pid
@@ -786,8 +771,19 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """err=cx-0.5 → PID 云台 yaw + 底盘前进；无 PID 时 yaw=Kp*err。"""
+    """
+    贴线一步（与官方循环同序）：
+      set_mode chassis_follow
+      err = cx - 0.5
+      pid.set_error(err); rotate_with_speed(get_output(), 0)
+      set_trans_speed(LINE_SPEED); move(0)
+    无 PID 时 yaw = Kp * err（同号，不取反）。
+    """
     global g_line_err, g_line_yaw_spd
+    try:
+        robot_ctrl.set_mode(rm_define.robot_mode_chassis_follow)
+    except Exception:
+        pass
     cx = g_line_cx
     err = cx - 0.5
     g_line_err = err
@@ -819,8 +815,14 @@ def line_follow_log_snapshot(tag):
     age = 0.0
     if g_patrol_line_t0 > 0.0:
         age = now_s() - g_patrol_line_t0
+    pit = 0.0
+    try:
+        pit = get_pitch()
+    except Exception:
+        pit = 0.0
     log(
-        "PATROL %s cx=%.3f err=%+.3f yaw=%+.0f spd=%.2f pts=%d hit=%d miss=%d age=%.2f"
+        "PATROL %s cx=%.3f err=%+.3f yaw=%+.0f spd=%.2f pts=%d hit=%d miss=%d "
+        "age=%.2f pitch=%.0f"
         % (
             tag,
             g_line_cx,
@@ -831,6 +833,7 @@ def line_follow_log_snapshot(tag):
             g_line_hit,
             g_line_miss,
             age,
+            pit,
         )
     )
 
@@ -1199,8 +1202,9 @@ def set_state(s, reason):
     if s == STATE_PATROL:
         fire_stop()
         chassis_halt()
+        # 姿态：绝对 yaw=0 + pitch=PITCH_LINE，再 chassis_follow（不叠相对 down）
+        gimbal_pose_line()
         mode_ensure_line_follow("patrol_start")
-        line_look_down()
         line_pid_init()
         fx_patrol()
         g_patrol_line_t0 = 0.0
@@ -1216,8 +1220,8 @@ def set_state(s, reason):
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
         log(
-            "PATROL ready spd=%.2f kp=%.0f ki=%.0f kd=%.0f"
-            % (LINE_SPEED, LINE_PID_KP, LINE_PID_KI, LINE_PID_KD)
+            "PATROL ready spd=%.2f kp=%.0f ki=%.0f kd=%.0f pitch=%.0f"
+            % (LINE_SPEED, LINE_PID_KP, LINE_PID_KI, LINE_PID_KD, get_pitch())
         )
 
     # SCAN：完整两遍步进扫描
@@ -1426,14 +1430,14 @@ def setup():
     line_pid_init()
     person_hit_reset()
     log(
-        "setup done v1.40.2 person w=%.2f~%.2f h=%.2f~%.2f"
+        "setup done v1.40.3 person w=%.2f~%.2f h=%.2f~%.2f"
         % (PERSON_MIN_W, PERSON_MAX_W, PERSON_MIN_H, PERSON_MAX_H)
     )
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.40.2 stamp=2026-08-07 15:35:00")
+    print("# LINE_GUARD_VERSION=1.40.3 stamp=2026-08-07 15:45:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
