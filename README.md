@@ -105,10 +105,9 @@ s1-line-guard/
 │   ├── line_guard.py      # ★ 正式哨兵（粘贴此文件）
 │   ├── README.md
 │   ├── line_pitch_test.py / person_detect_test.py / led_color_test.py
-│   └── wheel_clean.py     # 麦轮清洁（独立工具）
-├── resources/             # 仓库附带音素材（车载程序未引用）
 ├── logs/                  # 本地调试截图（一般不入库）
-└── scripts/
+├── resources/             # 预留
+└── scripts/               # 预留
 ```
 
 调试：App 控制台截图放入 `logs/`，对话说「看 logs」即可。

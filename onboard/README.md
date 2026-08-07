@@ -16,7 +16,6 @@
 | `line_pitch_test.py` | 蓝线识别 / 俯仰 / RmList dump |
 | `person_detect_test.py` | 行人识别灯效测试 |
 | `led_color_test.py` | 彩灯测试 |
-| `wheel_clean.py` | 麦轮清洁（慢速转轮） |
 
 行为权威：[`../docs/behavior-spec.md`](../docs/behavior-spec.md)。
 

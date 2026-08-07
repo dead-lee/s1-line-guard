@@ -34,6 +34,5 @@
 
 ## 范围外（除非改 behavior-spec）
 
-- 自定义 mp3 依赖、Mac 实时图传闭环  
-- 黑线巡线、PC SDK  
+- Mac 实时图传闭环、黑线巡线、PC SDK  
 - 规格未写的冷却 / 空扫上限 / coast 等  
