@@ -21,9 +21,9 @@
 
 S1 沿地面 **蓝色** 色带巡逻；定时停车扫视是否有人。发现行人后：
 
-1. **hit≥3 即 FIRE**：告警 + 边瞄边射（不再反复卡「当前是否有人」才开火）  
+1. **hit≥3 即 FIRE**：告警 + 边瞄边射  
 2. 节奏：**射约 3 s** → **停火只瞄约 3 s** → 再射 …  
-3. 开火中人丢了：底盘停、跟记忆框；**先做完告警与首段射击**，再允许因 miss 回 SCAN  
+3. 进入 FIRE 后：首段射击与告警按节奏执行；有检出用本帧框瞄准，无检出云台保持姿态；**首段射完后**连续 miss 超门槛才回 SCAN  
 4. 无线：底盘停，**反复完整 SCAN**；有线再回 PATROL  
 
 一句话：**沿线巡逻 → 停车扫人 → 发现即告警开火 → 做完再回扫/巡线。**
@@ -53,7 +53,7 @@ PATROL ──T_MOVE 贴线满──► SCAN
 |------|------|
 | **PATROL** | 低头循蓝线 `T_MOVE` 秒；**不认人** |
 | **SCAN** | 停车；规划 yaw 步进扫视；步间查人 |
-| **FIRE** | 立即边瞄边射；SHOOT/HOLD 交替 |
+| **FIRE** | 告警 + 边瞄边射；SHOOT/HOLD 交替 |
 
 细则见 [`docs/behavior-spec.md`](docs/behavior-spec.md)。
 
@@ -68,8 +68,9 @@ PATROL ──T_MOVE 贴线满──► SCAN
 | `SCAN_STEP_DEG` / `SCAN_LOOK_OPS` | 45° / 5 | 扫视步进；每角查人次数 |
 | `PITCH_LINE` / `PITCH_SCAN` | −20 / 20 | 巡线低头 / 扫人抬头 |
 | `LINE_SPEED` | 0.20 | 巡线固定前进速度 |
-| `LINE_YAW_KP` / `LINE_YAW_MAX` / `LINE_YAW_SIGN` | 200 / 60 / -1 | 贴线转向（SIGN 依日志 cx 同号恶化取反） |
-| `PERSON_MIN/MAX_W/H` | 见 CONFIG | 人体框尺寸带；过小/过大不算 hit |
+| `LINE_PID_KP/KI/KD` | 330 / 0 / 28 | 贴线 `PIDCtrl` 参数 |
+| `PERSON_MIN/MAX_W` | 0.09～0.20 | 人体框宽度带 |
+| `PERSON_MIN/MAX_H` | 0.50～0.85 | 人体框高度带 |
 | `ENABLE_FIRE` | True | 是否允许水弹（联调可改 False） |
 
 灯光对照见 [`docs/design-notes.md`](docs/design-notes.md)。
@@ -81,7 +82,7 @@ PATROL ──T_MOVE 贴线满──► SCAN
 | 点 | 说明 |
 |----|------|
 | 单摄像头 | 巡线低头、扫人抬头 → **分时** |
-| 入侵 | **检测到人**（几何过滤减误报；无精确测距） |
+| 入侵 | **检测到人**（w/h 尺寸带过滤；无精确测距） |
 | 线颜色 | 仅红/绿/蓝；本项目固定 **蓝** |
 | 车载 Python | 官方 API；**单文件**粘贴；无 pip / 不以 threading 为主 |
 | 水弹 | 俯仰过高时机内可能禁射；安全区域自理 |
@@ -99,7 +100,7 @@ s1-line-guard/
 ├── docs/
 │   ├── behavior-spec.md   # 行为权威
 │   ├── design-notes.md    # 灯光 / API 备忘
-│   └── dev-plan.md        # 里程碑摘要（须与现状一致）
+│   └── dev-plan.md        # 交付与联调
 ├── onboard/
 │   ├── line_guard.py      # ★ 正式哨兵（粘贴此文件）
 │   ├── README.md
@@ -116,8 +117,7 @@ s1-line-guard/
 
 ## 5. 场地与安全
 
-- 浅色地面 + **蓝色**色带（约 15–25 mm）；推荐 **单环 / 跑道形**（默认不做 8 字路口策略）。  
-- 8 字交叉口易半环绕圈或丢线，不推荐作默认场地。  
+- 浅色地面 + **蓝色**色带（约 15–25 mm）；推荐 **单环 / 跑道形**。  
 - 首次联调可将 `ENABLE_FIRE = False`；注意弹道与急停。
 
 ### 上车步骤

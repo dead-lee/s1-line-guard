@@ -10,9 +10,10 @@
 |------|------|
 | 单文件车载 | `onboard/line_guard.py` 粘贴进 App 实验室 |
 | 状态 | **PATROL ⇄ SCAN → FIRE** |
-| 巡线 | 蓝线 + `chassis_follow`；`[19]` + 纯 P yaw + 固定速度 0.20 |
+| 巡线 | 蓝线 + `chassis_follow`；`cx=[19]` + `PIDCtrl(330,0,28)` + 固定速度 0.20 |
 | 扫描 | 规划角步进约 45°；每角最多 5 次查人；hit≥3 → 立即 FIRE |
-| 交战 | 发现即告警+开火；射 3s / 停瞄 3s；丢人不停射；首段射完后 miss 才可放弃 |
+| 交战 | 发现即告警+开火；射 3s / 停瞄 3s；首段射击不依赖本帧检出；有检出 PID 瞄、无检出保持姿态；首段射完后 miss 可放弃 |
+| 人体框 | CONFIG `PERSON_MIN/MAX_W/H` 尺寸带，过带不计 hit |
 | 无线 | 反复完整 SCAN，有线再 PATROL |
 | 灯光 | 见 `design-notes.md` |
 

@@ -21,7 +21,7 @@
 | **红闪 + 枪口灯亮** | flash + gun | **射击段**（应有脉冲开火） |
 | **紫闪** | flash | 交战结束、即将整圈 SCAN |
 
-发现后进 FIRE：应先告警再进入射击段（枪口灯开）；不因单帧无人而只红不射。
+进 FIRE：告警后进入射击段（枪口灯开）；首段射击与本帧是否检出人无关。
 
 ---
 
@@ -30,22 +30,24 @@
 ### 控制权
 
 1. 进入 SCAN / FIRE 前：底盘 `stop`，`robot_mode_free`。  
-2. PATROL：`robot_mode_chassis_follow` + 官方 RmList 循线。  
+2. PATROL：`robot_mode_chassis_follow`；有线每步再确认 follow。  
 3. 离开 FIRE 前：`gun_ctrl.stop` 等停火。
 
 ### 阻塞与 sleep
 
 - `yaw_ctrl` / `pitch_ctrl` / `angle_ctrl` / `rotate_with_degree`：执行块，**到位后返回**；勿再叠 sleep「等硬件」。  
-- `rotate_with_speed`：速度环，需自行 `stop`。  
+- `rotate_with_speed`：速度环，需自行 `stop` 或置 0。  
 - `fire_once`：阻塞；本项目射击为脉冲 `fire_once`。
 
 ### 线 / 人
 
-- 线：`rm_ctrl.PIDCtrl` + `set_ctrl_params(330,0,28)`；`set_error(cx-0.5)` → `rotate_with_speed(get_output(),0)`；`set_trans_speed(0.2)` + `move(0)`。  
-- 人：API 报人先打 `PERSON raw`；仅 w/h 尺寸带，过小/过大打 `PERSON reject`。  
+- 线：`rm_ctrl.PIDCtrl` + `set_ctrl_params(330,0,28)`；`set_error(cx-0.5)` → `rotate_with_speed(get_output(),0)`；`set_trans_speed(0.2)` + `move(0)`。进 PATROL 用绝对姿态 `yaw=0`、`pitch=PITCH_LINE`。  
+- 人：API 报人打 `PERSON raw`；**仅 w/h 尺寸带**（见 CONFIG `PERSON_MIN/MAX_W/H`），过小/过大打 `PERSON reject` 且不计 hit。  
+- FIRE 瞄准：有检出用本帧框中心 PID；无检出云台速度置 0 保持姿态。
+
 ### 水弹
 
-- 约 **俯仰 >10°** 机内禁止水晶弹；扫人抬头可能导致「有 BURST 日志但无弹」。
+- 约 **俯仰 >10°** 机内禁止水晶弹；扫人抬头可能导致「有开火日志但无弹」。
 
 ### 非目标
 
