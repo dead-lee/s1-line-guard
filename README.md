@@ -28,7 +28,7 @@ S1 沿地面 **蓝色** 色带巡逻；定时停车扫视是否有人。发现�
 
 一句话：**沿线巡逻 → 停车扫人 → 发现即告警开火 → 做完再回扫/巡线。**
 
-自定义警告 mp3（`resources/`）为素材；车载默认用 **内置音效 + 灯色**（App 未必能播自定义文件）。
+告警反馈为 **机内内置音效 + 灯色**（`line_guard.py` 的 `sfx` / `fx_*`）。
 
 ---
 
@@ -106,7 +106,7 @@ s1-line-guard/
 │   ├── README.md
 │   ├── line_pitch_test.py / person_detect_test.py / led_color_test.py
 │   └── wheel_clean.py     # 麦轮清洁（独立工具）
-├── resources/             # 警告音素材（非车载必需）
+├── resources/             # 仓库附带音素材（车载程序未引用）
 ├── logs/                  # 本地调试截图（一般不入库）
 └── scripts/
 ```
