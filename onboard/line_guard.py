@@ -34,11 +34,7 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5
 
-# 巡线：严格对齐官方 App 示例（见 gist ROBOMASTER-S1 Line Follower）
-#   PIDCtrl.set_ctrl_params(330, 0, 28)
-#   set_error(cx - 0.5) → rotate_with_speed(get_output(), 0)
-#   chassis.set_trans_speed(0.2); chassis.move(0)
-# 禁止自造 SIGN / 软区 / 额外限幅（1.39.x 越改越差的根因）
+# 巡线 PID（官方参数）+ 固定前进速度
 LINE_SPEED = 0.20
 LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
@@ -687,7 +683,7 @@ def line_stable_false():
     return (now_s() - g_line_miss_t0) >= LINE_LOST_S
 
 def line_look_down():
-    """巡线低头（官方：gimbal_down 20°）。"""
+    """巡线低头。"""
     down_deg = -PITCH_LINE
     if down_deg < 0:
         down_deg = -down_deg
@@ -702,7 +698,7 @@ def line_look_down():
             log("LINE look_down FAIL")
 
 def line_pid_init():
-    """官方 PIDCtrl(330, 0, 28)。优先 rm_ctrl.PIDCtrl，再试裸 PIDCtrl。"""
+    """创建巡线 PIDCtrl；不可用则 g_line_pid=None（步进里用纯 P）。"""
     global g_line_pid
     g_line_pid = None
     try:
@@ -807,14 +803,7 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """
-    官方贴线（逐字对齐 App 示例）：
-      err = cx - 0.5
-      pid.set_error(err); yaw = pid.get_output()
-      gimbal.rotate_with_speed(yaw, 0)
-      chassis.set_trans_speed(0.2); chassis.move(0)
-    无 SIGN、无软区、无限幅。PID 不可用时纯 P=Kp*err（同号、不取反）。
-    """
+    """err=cx-0.5 → PID 云台 yaw + 底盘前进；无 PID 时 yaw=Kp*err。"""
     global g_line_err, g_line_yaw_spd
     cx = g_line_cx
     err = cx - 0.5
