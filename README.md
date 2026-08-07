@@ -68,7 +68,7 @@ PATROL ──T_MOVE 贴线满──► SCAN
 | `SCAN_STEP_DEG` / `SCAN_LOOK_OPS` | 45° / 5 | 扫视步进；每角查人次数 |
 | `PITCH_LINE` / `PITCH_SCAN` | −20 / 20 | 巡线低头 / 扫人抬头 |
 | `LINE_SPEED` | 0.20 | 巡线固定前进速度 |
-| `LINE_YAW_KP` / `LINE_YAW_MAX` | 200 / 60 | 贴线转向增益与上限（抑过冲） |
+| `LINE_YAW_KP` / `LINE_YAW_MAX` / `LINE_YAW_SIGN` | 200 / 60 / -1 | 贴线转向（SIGN 依日志 cx 同号恶化取反） |
 | `PERSON_MIN/MAX_W/H` | 见 CONFIG | 人体框尺寸带；过小/过大不算 hit |
 | `ENABLE_FIRE` | True | 是否允许水弹（联调可改 False） |
 
