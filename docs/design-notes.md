@@ -41,7 +41,7 @@
 
 ### 线 / 人
 
-- 线：`RmList`，`cx=[19]`，`set_error(cx-0.5)` + `PIDCtrl(330,0,28)`，固定速度；`|yaw|` 限幅；不每帧 `set_mode`。  
+- 线：`RmList`，`cx=[19]`，`err=cx-0.5` 纯 P 控 yaw，固定 `LINE_SPEED`，近中心软增益 + `|yaw|` 限幅。  
 - 人：`enable_detection(people)`；轮询 `get_people_detection_info` 或官方 `cond_wait`（阻塞，不宜插在步进 SCAN 中途单独依赖）。  
 - 行人误检（沙发/行李）官方无更好过滤器；几何启发式不可靠。
 

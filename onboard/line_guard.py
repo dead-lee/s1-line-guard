@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.38.0 stamp=2026-08-07 13:30:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.38.1 stamp=2026-08-07 13:45:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -24,13 +24,11 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
-# 巡线：err=cx-0.5 纯 P；温和增益 + 近中心再软，防转过头冲出线
+# 巡线：err=cx-0.5 纯 P + 近中心软增益
 LINE_SPEED = 0.12
-LINE_PID_KP = 140.0
-LINE_PID_KI = 0.0
-LINE_PID_KD = 0.0
-LINE_YAW_MAX = 55.0             # 硬顶，防猛甩
-LINE_SOFT_ERR = 0.08            # |err| 小于此再衰减 yaw
+LINE_YAW_KP = 140.0
+LINE_YAW_MAX = 55.0
+LINE_SOFT_ERR = 0.08
 LINE_SOFT_GAIN = 0.45
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_S = 1.5
@@ -101,24 +99,21 @@ g_line_err = 0.0
 g_line_yaw_spd = 0.0
 g_line_pts = 0
 g_line_ever_ok = False
-g_line_pid = None
 g_line_log_t = 0.0
 g_line_miss_t0 = 0.0
-# 记忆框：FOUND 建立；有检出刷新；无检出仍用于瞄准/开火
 g_track_on = False
 g_track_x = 0.5
 g_track_y = 0.5
 g_track_w = 0.2
 g_track_h = 0.3
-g_min_fire_done = False         # 是否已完成至少一整段 3s 射击
-# 扫描过程中最后一次有效人体框（FOUND 时若本帧闪断仍可建记忆）
+g_min_fire_done = False
 g_last_see_ok = False
 g_last_see_x = 0.5
 g_last_see_y = 0.5
 g_last_see_w = 0.2
 g_last_see_h = 0.3
 
-# SCAN 队列与当前段（规划角步进）
+# SCAN
 g_scan_queue = []
 g_scan_qi = 0
 g_scan_target_yaw = 0.0
@@ -598,33 +593,13 @@ def line_stable_true():
     return g_line_hit >= LINE_CONFIRM_FRAMES
 
 def line_stable_false():
-    """连续 LINE_LOST_S 秒看不到线才判丢线（勿用帧数：主循环过快）。"""
+    """连续 LINE_LOST_S 秒看不到线才判丢线。"""
     if g_line_miss_t0 <= 0.0:
         return False
     return (now_s() - g_line_miss_t0) >= LINE_LOST_S
 
-def line_pid_init():
-    """初始化巡线 PIDCtrl。"""
-    global g_line_pid
-    g_line_pid = None
-    try:
-        g_line_pid = PIDCtrl()
-        g_line_pid.set_ctrl_params(LINE_PID_KP, LINE_PID_KI, LINE_PID_KD)
-        log("LINE PIDCtrl ok")
-        return
-    except Exception:
-        pass
-    try:
-        g_line_pid = rm_ctrl.PIDCtrl()
-        g_line_pid.set_ctrl_params(LINE_PID_KP, LINE_PID_KI, LINE_PID_KD)
-        log("LINE rm_ctrl.PIDCtrl ok")
-        return
-    except Exception:
-        g_line_pid = None
-        log("LINE PIDCtrl unavailable, P only")
-
-def line_look_down_official():
-    """官方：相对低头 rotate_with_degree(gimbal_down, 20)。"""
+def line_look_down():
+    """巡线低头。"""
     down_deg = -PITCH_LINE
     if down_deg < 0:
         down_deg = -down_deg
@@ -718,17 +693,13 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """
-    贴线：err=cx-0.5 → 纯 P → yaw（限幅+近中心软增益，减转过头）。
-    固定 LINE_SPEED；不每帧 set_mode。
-    """
+    """贴线：err=cx-0.5 → P → yaw（限幅+近中心软增益）；固定 LINE_SPEED。"""
     global g_line_err, g_line_yaw_spd
     cx = g_line_cx
     err = cx - 0.5
     g_line_err = err
     abs_e = abs(err)
-    yaw_spd = err * LINE_PID_KP
-    # 近中心软刹：误差小则少转，避免左右甩过中线
+    yaw_spd = err * LINE_YAW_KP
     if abs_e < LINE_SOFT_ERR and abs_e > 0.001:
         yaw_spd = yaw_spd * LINE_SOFT_GAIN
     if yaw_spd > LINE_YAW_MAX:
@@ -1134,10 +1105,8 @@ def set_state(s, reason):
     if s == STATE_PATROL:
         fire_stop()
         chassis_halt()
-        # 官方：先 chassis_follow，再低头，再进循环贴线
-        line_pid_init()
         mode_ensure_line_follow("patrol_start")
-        line_look_down_official()
+        line_look_down()
         fx_patrol()
         g_patrol_line_t0 = 0.0
         g_line_hit = 0
@@ -1151,8 +1120,8 @@ def set_state(s, reason):
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-        log("PATROL ready spd=%.2f pid=%.0f/%.0f/%.0f" % (
-            LINE_SPEED, LINE_PID_KP, LINE_PID_KI, LINE_PID_KD
+        log("PATROL ready spd=%.2f yaw_kp=%.0f max=%.0f" % (
+            LINE_SPEED, LINE_YAW_KP, LINE_YAW_MAX
         ))
 
     # SCAN：完整两遍步进扫描
@@ -1357,15 +1326,14 @@ def setup():
     fx_patrol()
     pid_reset_aim()
     person_hit_reset()
-    line_pid_init()
-    log("setup done v1.38.0 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.38.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.38.0 stamp=2026-08-07 13:30:00")
+    print("# LINE_GUARD_VERSION=1.38.1 stamp=2026-08-07 13:45:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
