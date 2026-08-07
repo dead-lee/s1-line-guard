@@ -105,6 +105,7 @@ s1-line-guard/
 │   ├── line_guard.py      # ★ 正式哨兵（粘贴此文件）
 │   ├── README.md
 │   ├── line_pitch_test.py / person_detect_test.py / led_color_test.py
+│   └── wheel_clean.py     # 麦轮清洁
 ├── logs/                  # 本地调试截图（一般不入库）
 ├── resources/             # 预留
 └── scripts/               # 预留
@@ -130,3 +131,18 @@ s1-line-guard/
 ## 6. 许可
 
 见 [LICENSE](./LICENSE)（MIT）。与 DJI / RoboMaster 商标及官方条款无关。
+
+---
+
+## 7. 联调与维护工具（`onboard/`）
+
+正式交付是 `line_guard.py`。下列脚本在调通 baseline 时用过，**保留备用**；用法同样是全选粘贴进 App 实验室。
+
+| 文件 | 用途 |
+|------|------|
+| `led_color_test.py` | 装甲/云台灯色与效果轮换，确认灯控 API |
+| `line_pitch_test.py` | 蓝线识别、俯仰、RmList 字段（含 `cx`） |
+| `person_detect_test.py` | 行人识别与灯效反馈 |
+| `wheel_clean.py` | 麦轮慢速空转清洁（维护，非哨兵逻辑） |
+
+建议顺序：灯 → 线 → 人 → 全流程 `line_guard.py`。详见 [`docs/dev-plan.md`](docs/dev-plan.md)、[`onboard/README.md`](onboard/README.md)。

@@ -13,9 +13,10 @@
 | 文件 | 说明 |
 |------|------|
 | **`line_guard.py`** | **正式哨兵**（粘贴运行；看首行 `LINE_GUARD_VERSION`） |
-| `line_pitch_test.py` | 蓝线识别 / 俯仰 / RmList dump |
-| `person_detect_test.py` | 行人识别灯效测试 |
-| `led_color_test.py` | 彩灯测试 |
+| `line_pitch_test.py` | 蓝线识别 / 俯仰 / RmList dump（联调保留） |
+| `person_detect_test.py` | 行人识别灯效测试（联调保留） |
+| `led_color_test.py` | 彩灯测试（联调保留） |
+| `wheel_clean.py` | 麦轮慢速清洁（维护保留） |
 
 行为权威：[`../docs/behavior-spec.md`](../docs/behavior-spec.md)。
 
