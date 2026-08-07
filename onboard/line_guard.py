@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.40.0 stamp=2026-08-07 15:20:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.40.1 stamp=2026-08-07 15:25:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -12,15 +12,13 @@ T_MOVE = 6.0                    # PATROL 贴线前进多久（秒）后进入 SC
 PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIRE
 PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
-# 人体几何（画面 0~1）— 依据日志：
-#   空地误检 wh≈(0.21,0.87) asp≈4.1 → 用 MAX_H/MAX_ASPECT 滤
-#   真人站前若仍 frame=False 且无 reject，多半是 API 未报/俯仰；MIN 不宜过严
+# 人体几何（画面 0~1）：w/h 与高宽比带；过带不算 hit
 PERSON_MIN_W = 0.08
 PERSON_MAX_W = 0.45
 PERSON_MIN_H = 0.20
 PERSON_MAX_H = 0.80
 PERSON_MIN_ASPECT = 1.2
-PERSON_MAX_ASPECT = 3.5
+PERSON_MAX_ASPECT = 6.5
 PERSON_MAX_CY = 0.75
 PERSON_FIRE_MIN_W = 0.08
 PERSON_FIRE_MIN_H = 0.20
@@ -1443,7 +1441,7 @@ def setup():
     line_pid_init()
     person_hit_reset()
     log(
-        "setup done v1.40.0 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f"
+        "setup done v1.40.1 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f"
         % (
             PERSON_MIN_W,
             PERSON_MAX_W,
@@ -1457,7 +1455,7 @@ def setup():
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.40.0 stamp=2026-08-07 15:20:00")
+    print("# LINE_GUARD_VERSION=1.40.1 stamp=2026-08-07 15:25:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
