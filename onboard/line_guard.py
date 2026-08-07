@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.39.0 stamp=2026-08-07 15:00:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.39.1 stamp=2026-08-07 15:10:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -12,17 +12,18 @@ T_MOVE = 6.0                    # PATROL 贴线前进多久（秒）后进入 SC
 PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIRE
 PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
-# 人体几何（画面 0~1）：过小=远/碎块；过大/过瘦=顶满屏误检(日志 wh≈0.21×0.87)
-# 真人约 2~4m 常落在 h≈0.28~0.70；上限滤 h≈0.87 空地误报
-PERSON_MIN_W = 0.10
-PERSON_MAX_W = 0.40
-PERSON_MIN_H = 0.28
-PERSON_MAX_H = 0.78
-PERSON_MIN_ASPECT = 1.35
-PERSON_MAX_ASPECT = 3.4
-PERSON_MAX_CY = 0.72
-PERSON_FIRE_MIN_W = 0.10
-PERSON_FIRE_MIN_H = 0.28
+# 人体几何（画面 0~1）— 依据日志：
+#   空地误检 wh≈(0.21,0.87) asp≈4.1 → 用 MAX_H/MAX_ASPECT 滤
+#   真人站前若仍 frame=False 且无 reject，多半是 API 未报/俯仰；MIN 不宜过严
+PERSON_MIN_W = 0.08
+PERSON_MAX_W = 0.45
+PERSON_MIN_H = 0.20
+PERSON_MAX_H = 0.80
+PERSON_MIN_ASPECT = 1.2
+PERSON_MAX_ASPECT = 3.5
+PERSON_MAX_CY = 0.75
+PERSON_FIRE_MIN_W = 0.08
+PERSON_FIRE_MIN_H = 0.20
 
 PITCH_LINE = -20
 PITCH_SCAN = 20
@@ -33,9 +34,11 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5
 
-# 巡线方案 A：抑过冲（日志 cx 0.46→0.70 后丢线）
+# 巡线：1.39.0 日志 cx 0.384→0.347（err/yaw 同号变大）= 当前符号纠反 → 取反
+# 同时保留限幅+软区，减轻过冲
 LINE_SPEED = 0.20
 LINE_YAW_KP = 200.0
+LINE_YAW_SIGN = -1.0            # yaw = SIGN * err * Kp；err=cx-0.5
 LINE_YAW_MAX = 60.0
 LINE_SOFT_ERR = 0.11
 LINE_SOFT_GAIN = 0.40
@@ -361,6 +364,14 @@ def people_get_first():
         yf = float(y)
     except Exception:
         return False, 0.5, 0.5, 0.0, 0.0
+    # 凡 API 报 n>=1 先打 raw，便于对照过滤是否过严
+    asp0 = 0.0
+    if wf > 0.001:
+        asp0 = hf / wf
+    log(
+        "PERSON raw n=%d xy=(%.2f,%.2f) wh=(%.2f,%.2f) asp=%.2f"
+        % (ni, xf, yf, wf, hf, asp0)
+    )
     if xf < 0.0 or xf > 1.0 or yf < 0.0 or yf > 1.0:
         people_reject_log("xy_range", xf, yf, wf, hf)
         return False, xf, yf, wf, hf
@@ -768,13 +779,16 @@ def mode_ensure_line_follow(reason):
     log("MODE chassis_follow | %s" % reason)
 
 def line_follow_step():
-    """贴线：err=cx-0.5 → P → yaw（限幅+近中心软增益）；固定 LINE_SPEED。"""
+    """
+    贴线：err=cx-0.5；yaw = LINE_YAW_SIGN * err * Kp（限幅+软区）。
+    SIGN=-1 依据 1.39 日志：err/yaw 同号时 cx 更偏（0.384→0.347）。
+    """
     global g_line_err, g_line_yaw_spd
     cx = g_line_cx
     err = cx - 0.5
     g_line_err = err
     abs_e = abs(err)
-    yaw_spd = err * LINE_YAW_KP
+    yaw_spd = LINE_YAW_SIGN * err * LINE_YAW_KP
     if abs_e < LINE_SOFT_ERR and abs_e > 0.001:
         yaw_spd = yaw_spd * LINE_SOFT_GAIN
     if yaw_spd > LINE_YAW_MAX:
@@ -1195,9 +1209,10 @@ def set_state(s, reason):
         person_hit_reset()
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
-        log("PATROL ready spd=%.2f yaw_kp=%.0f max=%.0f" % (
-            LINE_SPEED, LINE_YAW_KP, LINE_YAW_MAX
-        ))
+        log(
+            "PATROL ready spd=%.2f yaw_kp=%.0f sign=%.0f max=%.0f"
+            % (LINE_SPEED, LINE_YAW_KP, LINE_YAW_SIGN, LINE_YAW_MAX)
+        )
 
     # SCAN：完整两遍步进扫描
     if s == STATE_SCAN:
@@ -1404,7 +1419,7 @@ def setup():
     pid_reset_aim()
     person_hit_reset()
     log(
-        "setup done v1.39.0 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f yaw_kp=%.0f max=%.0f"
+        "setup done v1.39.1 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f yaw_sign=%.0f"
         % (
             PERSON_MIN_W,
             PERSON_MAX_W,
@@ -1412,15 +1427,14 @@ def setup():
             PERSON_MAX_H,
             PERSON_MIN_ASPECT,
             PERSON_MAX_ASPECT,
-            LINE_YAW_KP,
-            LINE_YAW_MAX,
+            LINE_YAW_SIGN,
         )
     )
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.39.0 stamp=2026-08-07 15:00:00")
+    print("# LINE_GUARD_VERSION=1.39.1 stamp=2026-08-07 15:10:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")

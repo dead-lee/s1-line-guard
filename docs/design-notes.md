@@ -41,9 +41,9 @@
 
 ### 线 / 人
 
-- 线：`RmList`，`cx=[19]`，`err=cx-0.5` 纯 P；固定 `LINE_SPEED`；近中心软增益 + `|yaw|≤LINE_YAW_MAX` 抑过冲。  
-- 人：`get_people_detection_info` + 几何带（`PERSON_MIN/MAX_W/H` 与 aspect）；过小/过大/过瘦均不算 hit。  
-- 误检：顶满屏大框（如 h≈0.87）靠 `MAX_H`/`MAX_ASPECT` 滤；碎小框靠 `MIN_*`。
+- 线：`err=cx-0.5`，`yaw=LINE_YAW_SIGN*err*Kp`（本机 SIGN=-1，见 PATROL 日志 cx 同号恶化）；固定速度；软区+`YAW_MAX`。  
+- 人：API 报人先打 `PERSON raw`，再套几何带；过小/过大/aspect 打 `PERSON reject`。  
+- 空地误检例：`wh≈(0.21,0.87) asp≈4.1` → `too_large`/`aspect`。
 
 ### 水弹
 
