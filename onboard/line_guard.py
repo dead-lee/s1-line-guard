@@ -34,7 +34,7 @@ SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5
 
-# 巡线 PID（官方参数）+ 固定前进速度
+# 巡线 PID + 固定前进速度
 LINE_SPEED = 0.20
 LINE_PID_KP = 330.0
 LINE_PID_KI = 0.0
@@ -637,7 +637,7 @@ def line_get_rmlist():
         return raw
 
 def line_read():
-    """官方：len==42 且 [2]>=1，cx=[19]。返回 (ok, cx, n, pts)。"""
+    """len==42 且 [2]>=1 时有效，cx=[19]。返回 (ok, cx, n, pts)。"""
     info = line_get_rmlist()
     try:
         n = len(info)
@@ -648,7 +648,7 @@ def line_read():
         pts = int(info[2])
     except Exception:
         pts = 0
-    # 与官方一致优先 len==42；兼容少数固件 >=42
+    # 有效帧：pts>=1 且 len>=42
     if pts >= 1 and (n == 42 or n >= 42):
         try:
             cx = float(info[19])
@@ -1233,7 +1233,7 @@ def set_state(s, reason):
         vision_ctrl.enable_detection(rm_define.vision_detection_line)
         vision_ctrl.line_follow_color_set(rm_define.line_follow_color_blue)
         log(
-            "PATROL ready official_pid spd=%.2f kp=%.0f ki=%.0f kd=%.0f"
+            "PATROL ready spd=%.2f kp=%.0f ki=%.0f kd=%.0f"
             % (LINE_SPEED, LINE_PID_KP, LINE_PID_KI, LINE_PID_KD)
         )
 
@@ -1270,12 +1270,12 @@ def set_state(s, reason):
 def tick_patrol():
     """
     蓝线巡线 T_MOVE 秒后进 SCAN。
-    有线：按官方 PID 贴线；无线：停车；持续 LINE_LOST_S 秒无线才 SCAN。
+    有线：PID 贴线；无线：停车；持续 LINE_LOST_S 秒无线才 SCAN。
     """
     global g_patrol_line_t0, g_line_log_t
     line_update()
     if g_line_hit < 1:
-        # 本帧无线：停车（官方循环只是不发指令；我们停车防冲出）
+        # 本帧无线：停车
         try:
             gimbal_ctrl.rotate_with_speed(0, 0)
         except Exception:
@@ -1299,7 +1299,7 @@ def tick_patrol():
             set_state(STATE_SCAN, "no_line_timeout")
             return
         return
-    # 有线：官方贴线（先 step 再 log，避免 start 时 err/yaw 仍为 0）
+    # 有线：先 step 再 log（start 时 err/yaw 已更新）
     if g_patrol_line_t0 <= 0.0:
         g_patrol_line_t0 = now_s()
         g_line_log_t = 0.0
@@ -1443,7 +1443,7 @@ def setup():
     line_pid_init()
     person_hit_reset()
     log(
-        "setup done v1.40.0 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f line=official_pid"
+        "setup done v1.40.0 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f"
         % (
             PERSON_MIN_W,
             PERSON_MAX_W,
