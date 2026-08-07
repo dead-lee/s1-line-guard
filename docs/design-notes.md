@@ -42,8 +42,7 @@
 ### 线 / 人
 
 - 线：`rm_ctrl.PIDCtrl` + `set_ctrl_params(330,0,28)`；`set_error(cx-0.5)` → `rotate_with_speed(get_output(),0)`；`set_trans_speed(0.2)` + `move(0)`。  
-- 人：API 报人先打 `PERSON raw`，再套几何带；过小/过大/aspect 打 `PERSON reject`。  
-- 空地误检例：`wh≈(0.21,0.87) asp≈4.1` → `too_large`/`aspect`。
+- 人：API 报人先打 `PERSON raw`；仅 w/h 尺寸带，过小/过大打 `PERSON reject`（不用 aspect/cy 卡 hit）。
 
 ### 水弹
 

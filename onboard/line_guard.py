@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.40.1 stamp=2026-08-07 15:25:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.40.2 stamp=2026-08-07 15:35:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -12,14 +12,11 @@ T_MOVE = 6.0                    # PATROL 贴线前进多久（秒）后进入 SC
 PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIRE
 PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
-# 人体几何（画面 0~1）：w/h 与高宽比带；过带不算 hit
+# 人体框尺寸（画面 0~1）：仅 w/h 上下限；过带不算 hit（不用 aspect/cy）
 PERSON_MIN_W = 0.08
 PERSON_MAX_W = 0.45
 PERSON_MIN_H = 0.20
 PERSON_MAX_H = 0.80
-PERSON_MIN_ASPECT = 1.2
-PERSON_MAX_ASPECT = 6.5
-PERSON_MAX_CY = 0.75
 PERSON_FIRE_MIN_W = 0.08
 PERSON_FIRE_MIN_H = 0.20
 
@@ -308,20 +305,20 @@ def fx_person_lost():
 # VISION — 行人检测与防抖
 # =============================================================================
 def people_reject_log(reason, x, y, w, h):
-    """API 报了人但几何不像行人时记一条（节流，避免刷屏）。"""
+    """API 报了人但未过尺寸带时记一条（节流）。"""
     global g_last_person_reject_t
     t = now_s()
     if g_last_person_reject_t > 0.0 and (t - g_last_person_reject_t) < 0.4:
         return
     g_last_person_reject_t = t
-    log("PERSON reject %s xy=(%.2f,%.2f) wh=(%.2f,%.2f) asp=%.2f" % (
-        reason, x, y, w, h, (h / w) if w > 0.001 else 0.0
-    ))
+    log(
+        "PERSON reject %s xy=(%.2f,%.2f) wh=(%.2f,%.2f)"
+        % (reason, x, y, w, h)
+    )
 
 def people_get_first():
     """
-    取第一个行人框。未过几何带 → ok=False，不算 hit。
-    过滤：w/h 在 [MIN,MAX]、高宽比在 [MIN,MAX]、中心不过低。
+    取第一个行人框。仅 n≥1 且 w/h 在 [MIN,MAX] 才算 hit。
     返回 (ok, x, y, w, h)
     """
     info = vision_ctrl.get_people_detection_info()
@@ -360,13 +357,9 @@ def people_get_first():
         yf = float(y)
     except Exception:
         return False, 0.5, 0.5, 0.0, 0.0
-    # 凡 API 报 n>=1 先打 raw，便于对照过滤是否过严
-    asp0 = 0.0
-    if wf > 0.001:
-        asp0 = hf / wf
     log(
-        "PERSON raw n=%d xy=(%.2f,%.2f) wh=(%.2f,%.2f) asp=%.2f"
-        % (ni, xf, yf, wf, hf, asp0)
+        "PERSON raw n=%d xy=(%.2f,%.2f) wh=(%.2f,%.2f)"
+        % (ni, xf, yf, wf, hf)
     )
     if xf < 0.0 or xf > 1.0 or yf < 0.0 or yf > 1.0:
         people_reject_log("xy_range", xf, yf, wf, hf)
@@ -376,14 +369,6 @@ def people_get_first():
         return False, xf, yf, wf, hf
     if wf > PERSON_MAX_W or hf > PERSON_MAX_H:
         people_reject_log("too_large", xf, yf, wf, hf)
-        return False, xf, yf, wf, hf
-    if wf > 0.001:
-        asp = hf / wf
-        if asp < PERSON_MIN_ASPECT or asp > PERSON_MAX_ASPECT:
-            people_reject_log("aspect", xf, yf, wf, hf)
-            return False, xf, yf, wf, hf
-    if yf > PERSON_MAX_CY:
-        people_reject_log("too_low", xf, yf, wf, hf)
         return False, xf, yf, wf, hf
     return True, xf, yf, wf, hf
 
@@ -1441,21 +1426,14 @@ def setup():
     line_pid_init()
     person_hit_reset()
     log(
-        "setup done v1.40.1 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f"
-        % (
-            PERSON_MIN_W,
-            PERSON_MAX_W,
-            PERSON_MIN_H,
-            PERSON_MAX_H,
-            PERSON_MIN_ASPECT,
-            PERSON_MAX_ASPECT,
-        )
+        "setup done v1.40.2 person w=%.2f~%.2f h=%.2f~%.2f"
+        % (PERSON_MIN_W, PERSON_MAX_W, PERSON_MIN_H, PERSON_MAX_H)
     )
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.40.1 stamp=2026-08-07 15:25:00")
+    print("# LINE_GUARD_VERSION=1.40.2 stamp=2026-08-07 15:35:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
