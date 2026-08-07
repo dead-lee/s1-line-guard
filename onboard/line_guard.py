@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.40.4 stamp=2026-08-07 15:50:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.40.5 stamp=2026-08-07 16:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -13,12 +13,12 @@ PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIR
 PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
 # 人体框尺寸（画面 0~1）：w/h 上下限，过带不算 hit
-PERSON_MIN_W = 0.08
-PERSON_MAX_W = 0.45
-PERSON_MIN_H = 0.20
-PERSON_MAX_H = 0.90
-PERSON_FIRE_MIN_W = 0.08
-PERSON_FIRE_MIN_H = 0.20
+PERSON_MIN_W = 0.09
+PERSON_MAX_W = 0.20
+PERSON_MIN_H = 0.50
+PERSON_MAX_H = 0.85
+PERSON_FIRE_MIN_W = 0.09
+PERSON_FIRE_MIN_H = 0.50
 
 PITCH_LINE = -20
 PITCH_SCAN = 20
@@ -1437,14 +1437,14 @@ def setup():
     line_pid_init()
     person_hit_reset()
     log(
-        "setup done v1.40.4 person w=%.2f~%.2f h=%.2f~%.2f"
+        "setup done v1.40.5 person w=%.2f~%.2f h=%.2f~%.2f"
         % (PERSON_MIN_W, PERSON_MAX_W, PERSON_MIN_H, PERSON_MAX_H)
     )
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.40.4 stamp=2026-08-07 15:50:00")
+    print("# LINE_GUARD_VERSION=1.40.5 stamp=2026-08-07 16:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
