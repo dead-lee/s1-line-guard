@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.38.1 stamp=2026-08-07 13:45:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.38.2 stamp=2026-08-07 14:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -25,11 +25,11 @@ SCAN_STEP_DEG = 45.0
 SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
 
 # 巡线：err=cx-0.5 纯 P + 近中心软增益
-LINE_SPEED = 0.12
-LINE_YAW_KP = 140.0
-LINE_YAW_MAX = 55.0
-LINE_SOFT_ERR = 0.08
-LINE_SOFT_GAIN = 0.45
+LINE_SPEED = 0.20
+LINE_YAW_KP = 330.0
+LINE_YAW_MAX = 200.0
+LINE_SOFT_ERR = 0.06
+LINE_SOFT_GAIN = 0.55
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_S = 1.5
 LINE_LOG_DT = 1.0
@@ -1326,14 +1326,14 @@ def setup():
     fx_patrol()
     pid_reset_aim()
     person_hit_reset()
-    log("setup done v1.38.1 hit_need=%d miss_need=%d fire_on=%.1fs" % (
+    log("setup done v1.38.2 hit_need=%d miss_need=%d fire_on=%.1fs" % (
         PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
     ))
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.38.1 stamp=2026-08-07 13:45:00")
+    print("# LINE_GUARD_VERSION=1.38.2 stamp=2026-08-07 14:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")
