@@ -41,7 +41,7 @@
 
 ### 线 / 人
 
-- 线：`err=cx-0.5`，`yaw=LINE_YAW_SIGN*err*Kp`（本机 SIGN=-1，见 PATROL 日志 cx 同号恶化）；固定速度；软区+`YAW_MAX`。  
+- 线：**严格官方** `rm_ctrl.PIDCtrl` + `set_ctrl_params(330,0,28)`；`set_error(cx-0.5)` → `rotate_with_speed(get_output(),0)`；`set_trans_speed(0.2)` + `move(0)`。**禁止** SIGN 翻转 / 自造软区 / 额外限幅（1.39.x 越改越差）。  
 - 人：API 报人先打 `PERSON raw`，再套几何带；过小/过大/aspect 打 `PERSON reject`。  
 - 空地误检例：`wh≈(0.21,0.87) asp≈4.1` → `too_large`/`aspect`。
 
