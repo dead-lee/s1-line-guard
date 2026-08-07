@@ -1,4 +1,4 @@
-# LINE_GUARD_VERSION=1.38.2 stamp=2026-08-07 14:00:00  (paste this whole file; check stamp matches latest)
+# LINE_GUARD_VERSION=1.39.0 stamp=2026-08-07 15:00:00  (paste this whole file; check stamp matches latest)
 # -*- coding: utf-8 -*-
 # S1 Line Guard — 单文件粘贴进 App 实验室
 #
@@ -12,24 +12,33 @@ T_MOVE = 6.0                    # PATROL 贴线前进多久（秒）后进入 SC
 PERSON_HIT_NEED = 3             # 连续 hit≥此值才算发现 → 立即 FIRE
 PERSON_MISS_NEED = 3            # 已射满至少 3s 后：连续 miss 超过此值 → 整圈 SCAN
 
-PERSON_FIRE_MIN_W = 0.10        # 开火框最小宽（记忆框尺寸也用此）
-PERSON_FIRE_MIN_H = 0.16
+# 人体几何（画面 0~1）：过小=远/碎块；过大/过瘦=顶满屏误检(日志 wh≈0.21×0.87)
+# 真人约 2~4m 常落在 h≈0.28~0.70；上限滤 h≈0.87 空地误报
+PERSON_MIN_W = 0.10
+PERSON_MAX_W = 0.40
+PERSON_MIN_H = 0.28
+PERSON_MAX_H = 0.78
+PERSON_MIN_ASPECT = 1.35
+PERSON_MAX_ASPECT = 3.4
+PERSON_MAX_CY = 0.72
+PERSON_FIRE_MIN_W = 0.10
+PERSON_FIRE_MIN_H = 0.28
 
-PITCH_LINE = -20                # 巡线低头绝对角
-PITCH_SCAN = 20                 # 扫人/交战抬头
+PITCH_LINE = -20
+PITCH_SCAN = 20
 GIMBAL_YAW_SPEED = 540.0
 
 SCAN_CW = 180.0
 SCAN_CCW = -180.0
 SCAN_STEP_DEG = 45.0
-SCAN_LOOK_OPS = 5               # 每角查人次数；满仍 hit<3 → 下一角
+SCAN_LOOK_OPS = 5
 
-# 巡线：err=cx-0.5 纯 P + 近中心软增益
+# 巡线方案 A：抑过冲（日志 cx 0.46→0.70 后丢线）
 LINE_SPEED = 0.20
-LINE_YAW_KP = 330.0
-LINE_YAW_MAX = 200.0
-LINE_SOFT_ERR = 0.06
-LINE_SOFT_GAIN = 0.55
+LINE_YAW_KP = 200.0
+LINE_YAW_MAX = 60.0
+LINE_SOFT_ERR = 0.11
+LINE_SOFT_GAIN = 0.40
 LINE_CONFIRM_FRAMES = 3
 LINE_LOST_S = 1.5
 LINE_LOG_DT = 1.0
@@ -52,15 +61,11 @@ AIM_ACQUIRE_YAW_MAX = 300.0
 AIM_D_MAX = 1.8
 AIM_TRACK_ALPHA = 0.48
 
-PERSON_MIN_W = 0.08
-PERSON_MIN_H = 0.14
-PERSON_MIN_ASPECT = 1.15
-PERSON_MAX_CY = 0.72
-
 T_FIRE_ON = 3.0                 # 射击段：边瞄边射
 T_FIRE_OFF = 3.0                # 停火段：只瞄
 FIRE_PULSE_INTERVAL = 0.18
 FIRE_BEADS_PER_PULSE = 2
+FIRE_LOG_DT = 0.5               # FIRE 瞄准诊断日志间隔
 
 ENABLE_FIRE = True
 FLASH_HZ = 3
@@ -112,6 +117,14 @@ g_last_see_x = 0.5
 g_last_see_y = 0.5
 g_last_see_w = 0.2
 g_last_see_h = 0.3
+# FIRE 瞄准诊断（图像坐标记忆 ≠ 世界固定点，mem 跟随时易一直转）
+g_aim_src = "none"
+g_aim_err_yaw = 0.0
+g_aim_err_pit = 0.0
+g_aim_yaw_cmd = 0.0
+g_aim_pit_cmd = 0.0
+g_aim_centered = False
+g_fire_log_t = 0.0
 
 # SCAN
 g_scan_queue = []
@@ -308,8 +321,8 @@ def people_reject_log(reason, x, y, w, h):
 
 def people_get_first():
     """
-    取第一个行人框。S1 常对行李/地面误报 n>=1，故除计数外还过滤：
-      最小宽高、高宽比（站立人偏高）、框中心不能过靠画面下方。
+    取第一个行人框。未过几何带 → ok=False，不算 hit。
+    过滤：w/h 在 [MIN,MAX]、高宽比在 [MIN,MAX]、中心不过低。
     返回 (ok, x, y, w, h)
     """
     info = vision_ctrl.get_people_detection_info()
@@ -341,7 +354,6 @@ def people_get_first():
         return False, 0.5, 0.5, 0.0, 0.0
     if ni < 1:
         return False, 0.5, 0.5, 0.0, 0.0
-    # 以下：API 认为「有人」，但可能是误检
     try:
         wf = float(w)
         hf = float(h)
@@ -353,11 +365,16 @@ def people_get_first():
         people_reject_log("xy_range", xf, yf, wf, hf)
         return False, xf, yf, wf, hf
     if wf < PERSON_MIN_W or hf < PERSON_MIN_H:
-        people_reject_log("size", xf, yf, wf, hf)
+        people_reject_log("too_small", xf, yf, wf, hf)
         return False, xf, yf, wf, hf
-    if wf > 0.001 and (hf / wf) < PERSON_MIN_ASPECT:
-        people_reject_log("aspect", xf, yf, wf, hf)
+    if wf > PERSON_MAX_W or hf > PERSON_MAX_H:
+        people_reject_log("too_large", xf, yf, wf, hf)
         return False, xf, yf, wf, hf
+    if wf > 0.001:
+        asp = hf / wf
+        if asp < PERSON_MIN_ASPECT or asp > PERSON_MAX_ASPECT:
+            people_reject_log("aspect", xf, yf, wf, hf)
+            return False, xf, yf, wf, hf
     if yf > PERSON_MAX_CY:
         people_reject_log("too_low", xf, yf, wf, hf)
         return False, xf, yf, wf, hf
@@ -500,10 +517,13 @@ def _aim_soft_scale(abs_err):
     return AIM_SOFT_MIN + (1.0 - AIM_SOFT_MIN) * t
 
 def aim_pid_towards_xy(x, y, dt):
-    """瞄准：大偏差快锁；软刹区降 max 防过冲；仅双轴死区硬停。"""
+    """瞄准：把图像坐标 (x,y) 拉向画面中心。"""
     global g_iy, g_ey_prev, g_ip, g_ep_prev
+    global g_aim_err_yaw, g_aim_err_pit, g_aim_yaw_cmd, g_aim_pit_cmd, g_aim_centered
     err_yaw = x - 0.5
     err_pitch = y - 0.5
+    g_aim_err_yaw = err_yaw
+    g_aim_err_pit = err_pitch
     abs_ey = abs(err_yaw)
     abs_ep = abs(err_pitch)
     if abs_ey < AIM_DEADZONE and abs_ep < AIM_DEADZONE:
@@ -511,8 +531,12 @@ def aim_pid_towards_xy(x, y, dt):
         g_ip = 0.0
         g_ey_prev = err_yaw
         g_ep_prev = err_pitch
+        g_aim_yaw_cmd = 0.0
+        g_aim_pit_cmd = 0.0
+        g_aim_centered = True
         gimbal_stop()
         return True
+    g_aim_centered = False
     if abs_ey >= AIM_ACQUIRE_ERR:
         yaw_max = AIM_ACQUIRE_YAW_MAX
     else:
@@ -524,6 +548,8 @@ def aim_pid_towards_xy(x, y, dt):
     pitch_spd, g_ip, g_ep_prev = pid_step(
         err_pitch, g_ip, g_ep_prev, AIM_PITCH_KP, AIM_PITCH_KI, AIM_PITCH_KD, pitch_max, dt
     )
+    g_aim_yaw_cmd = yaw_spd
+    g_aim_pit_cmd = -pitch_spd
     try:
         gimbal_ctrl.rotate_with_speed(yaw_spd, -pitch_spd)
     except Exception:
@@ -531,16 +557,65 @@ def aim_pid_towards_xy(x, y, dt):
     return abs_ey < AIM_OK_ERR and abs_ep < AIM_OK_ERR
 
 def aim_pid_track():
-    """有检出 EMA 刷新并跟平滑中心；无检出跟记忆框。"""
+    """
+    有检出：刷新记忆并跟（图像坐标会随云台变）。
+    无检出：跟冻结的记忆图像坐标——云台一转，误差不会因「记忆未动」而变小，
+    可能持续 rotate（这是 mem 跟瞄逻辑问题，用 FIRE 日志观察）。
+    """
+    global g_aim_src, g_aim_yaw_cmd, g_aim_pit_cmd, g_aim_centered
+    global g_aim_err_yaw, g_aim_err_pit
     dt = aim_pid_dt()
     ok, x, y, w, h = people_get_first()
     if ok:
         track_set(x, y, w, h)
+        g_aim_src = "live"
         return aim_pid_towards_xy(g_track_x, g_track_y, dt), True
     if g_track_on:
+        g_aim_src = "mem"
         return aim_pid_towards_xy(g_track_x, g_track_y, dt), False
+    g_aim_src = "stop"
+    g_aim_yaw_cmd = 0.0
+    g_aim_pit_cmd = 0.0
+    g_aim_err_yaw = 0.0
+    g_aim_err_pit = 0.0
+    g_aim_centered = True
     gimbal_stop()
     return False, False
+
+def fire_aim_log_tick():
+    """FIRE 内限频打瞄准诊断。"""
+    global g_fire_log_t
+    t = now_s()
+    if g_fire_log_t > 0.0 and (t - g_fire_log_t) < FIRE_LOG_DT:
+        return
+    g_fire_log_t = t
+    ph = "SHOOT"
+    if g_fire_phase == FIRE_PHASE_HOLD:
+        ph = "HOLD"
+    gy = 0.0
+    try:
+        gy = get_yaw()
+    except Exception:
+        gy = 0.0
+    log(
+        "FIRE_AIM ph=%s src=%s miss=%d track=(%.2f,%.2f) errY=%+.3f errP=%+.3f "
+        "cmdY=%+.0f cmdP=%+.0f ctr=%s gyaw=%.0f min_fire=%d shots=%d"
+        % (
+            ph,
+            g_aim_src,
+            g_person_miss,
+            g_track_x,
+            g_track_y,
+            g_aim_err_yaw,
+            g_aim_err_pit,
+            g_aim_yaw_cmd,
+            g_aim_pit_cmd,
+            str(g_aim_centered),
+            gy,
+            1 if g_min_fire_done else 0,
+            g_burst_shots,
+        )
+    )
 
 # =============================================================================
 # LINE VISION — RmList 读蓝线
@@ -1141,6 +1216,7 @@ def set_state(s, reason):
         g_min_fire_done = False
         g_burst_shots = 0
         g_last_shot_t = 0.0
+        g_fire_log_t = 0.0
         track_ensure_for_engage()
         g_ir_done = False
         fire_ir_warn_once()
@@ -1270,13 +1346,14 @@ def tick_scan():
 
 def tick_fire():
     """
-    底盘停；跟记忆框瞄准；SHOOT 3s / HOLD 3s。
-    丢人不停射、不回中；仅首段射击完成后才允许 miss 放弃。
+    底盘停；瞄准 live 或 mem；SHOOT 3s / HOLD 3s。
+    丢人不停射；首段射完后 miss 才可放弃。
     """
-    global g_fire_phase, g_phase_t0, g_min_fire_done
+    global g_fire_phase, g_phase_t0, g_min_fire_done, g_fire_log_t
     chassis_halt()
     person_track_update()
     aim_pid_track()
+    fire_aim_log_tick()
 
     if person_confirmed_lost():
         log("FIRE give_up miss=%d min_fire_done=1 shots=%d -> SCAN" % (
@@ -1326,14 +1403,24 @@ def setup():
     fx_patrol()
     pid_reset_aim()
     person_hit_reset()
-    log("setup done v1.38.2 hit_need=%d miss_need=%d fire_on=%.1fs" % (
-        PERSON_HIT_NEED, PERSON_MISS_NEED, T_FIRE_ON
-    ))
+    log(
+        "setup done v1.39.0 person w=%.2f~%.2f h=%.2f~%.2f asp=%.1f~%.1f yaw_kp=%.0f max=%.0f"
+        % (
+            PERSON_MIN_W,
+            PERSON_MAX_W,
+            PERSON_MIN_H,
+            PERSON_MAX_H,
+            PERSON_MIN_ASPECT,
+            PERSON_MAX_ASPECT,
+            LINE_YAW_KP,
+            LINE_YAW_MAX,
+        )
+    )
 
 def start():
     global g_state
     print("======== Line Guard start ========")
-    print("# LINE_GUARD_VERSION=1.38.2 stamp=2026-08-07 14:00:00")
+    print("# LINE_GUARD_VERSION=1.39.0 stamp=2026-08-07 15:00:00")
     log("program start")
     setup()
     set_state(STATE_PATROL, "boot")

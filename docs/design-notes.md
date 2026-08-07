@@ -41,9 +41,9 @@
 
 ### 线 / 人
 
-- 线：`RmList`，`cx=[19]`，`err=cx-0.5` 纯 P 控 yaw，固定 `LINE_SPEED`，近中心软增益 + `|yaw|` 限幅。  
-- 人：`enable_detection(people)`；轮询 `get_people_detection_info` 或官方 `cond_wait`（阻塞，不宜插在步进 SCAN 中途单独依赖）。  
-- 行人误检（沙发/行李）官方无更好过滤器；几何启发式不可靠。
+- 线：`RmList`，`cx=[19]`，`err=cx-0.5` 纯 P；固定 `LINE_SPEED`；近中心软增益 + `|yaw|≤LINE_YAW_MAX` 抑过冲。  
+- 人：`get_people_detection_info` + 几何带（`PERSON_MIN/MAX_W/H` 与 aspect）；过小/过大/过瘦均不算 hit。  
+- 误检：顶满屏大框（如 h≈0.87）靠 `MAX_H`/`MAX_ASPECT` 滤；碎小框靠 `MIN_*`。
 
 ### 水弹
 
